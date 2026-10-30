@@ -4,11 +4,20 @@
   "private": true,
   "type": "module",
   "description": "An invite-only team lead and outreach dashboard with reviewed scoring.",
-  "engines": { "node": ">=24.0.0" },
+  "engines": {
+    "node": ">=24.0.0"
+  },
   "scripts": {
+    "build:pages": "node scripts/build-pages.mjs",
+    "check:pages": "wrangler pages functions build functions --outdir=.wrangler/pages-build --compatibility-date=2026-10-30",
+    "test:pages": "node scripts/verify-pages.mjs",
     "start": "node --env-file-if-exists=.env server.mjs",
     "dev": "node --watch --env-file-if-exists=.env server.mjs",
     "test": "node --test tests/*.test.mjs",
-    "check": "node --check server.mjs && node --check lib/store.mjs && node --check public/app.js && node --check scripts/reset-password.mjs"
+    "check": "node --check server.mjs && node --check lib/store.mjs && node --check lib/rules.mjs && node --check public/app.js && node --check scripts/reset-password.mjs && node --check cloudflare/app.mjs && node --check cloudflare/store.mjs && node --check cloudflare/auth.mjs && node --check scripts/build-pages.mjs && node --check scripts/verify-pages.mjs"
+  },
+  "devDependencies": {
+    "miniflare": "5.20261023.3-beta",
+    "wrangler": "4.156.0"
   }
 }

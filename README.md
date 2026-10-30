@@ -2,6 +2,12 @@
 
 A mobile-responsive shared dashboard for a lead-sourcing and outreach team, with a Material-inspired purple sidebar, elevated stat cards, and colored charts following the supplied design reference. A real Node server and SQLite database keep everyone in the same workspace; team records are not stored in browser local storage.
 
+## Open it online with Cloudflare Pages
+
+This repository now includes **Cloudflare Pages Functions + D1** support for the complete dashboard, including sign-in, invitations, reviews, outcomes, goals, and shared scoring. After deployment, your team uses the website link without running a local server.
+
+**[Follow the Cloudflare setup guide](CLOUDFLARE-SETUP.md).** Choose framework **None**, build command **`npm run build:pages`**, output **`dist`**, and Node **24**. Bind a D1 database as **`DB`**, initialize it with **`cloudflare/schema.sql`**, and add the private **`SETUP_TOKEN`** secret before creating your admin account. Cloudflare deploys updates from `main` automatically after you connect GitHub. No Composio connection is needed.
+
 ## Scoring
 
 | Contribution | Reward | Required before it counts |
@@ -17,7 +23,7 @@ Lead submissions do **not** award points. The leaderboard switches between **By 
 
 ## Run locally
 
-Requires **Node.js 24 or newer**. There are no third-party runtime packages or installation step.
+Requires **Node.js 24 or newer**. The standalone Node server has no third-party runtime packages. Cloudflare build and verification tools are development dependencies; use `npm ci` before those commands.
 
 ```powershell
 git clone https://github.com/NEXWEB-dot/leaddashboard.git
@@ -89,7 +95,7 @@ New outcome records are stored separately from the original submissions table, p
 
 ## Hosting for your team
 
-This is a server-backed app. **GitHub stores its source; GitHub Pages cannot run its Node server or shared database.** No public hosted deployment is configured automatically.
+This is a server-backed app. **GitHub stores its source; GitHub Pages cannot run its backend or shared database.** For Cloudflare Pages, use the guide above and its Pages Functions + D1 backend. The rest of this hosting section describes the separate standalone Node/SQLite deployment option. No remote project is provisioned automatically.
 
 Use a Node 24 host with HTTPS and a **persistent local disk**. Set:
 
@@ -132,6 +138,17 @@ The operator must verify the account owner's identity before recovery. Recovery 
 npm run check
 npm test
 ```
+
+Cloudflare validation:
+
+```text
+npm ci
+npm run build:pages
+npm run check:pages
+npm run test:pages
+```
+
+The Cloudflare integration tests cover D1-style atomic transactions and simultaneous setup/invitation/review attempts. `test:pages` also runs the compiled Pages Functions and D1 schema in Cloudflare's local workerd runtime. It needs no connected account and does not access a remote database. Cloudflare passwords use Web Crypto PBKDF2-SHA256; standalone Node passwords use scrypt. Each backend keeps its own accounts and sessions.
 
 The tests cover URL aliases and unsafe links, invite binding/expiry/reuse, score tampering, owner self-review auditing, single-admin enforcement and legacy migration, client outcome rewards, private evidence, persistent weekly goals, and member permission attacks, review/revocation, duplicate claims, private evidence, immutable audit events, ranking ties, Karachi date boundaries, persistent storage, CSRF/origin checks, protected routes, password changes, and production cookie settings. GitHub Actions runs these checks on pushes and pull requests.
 

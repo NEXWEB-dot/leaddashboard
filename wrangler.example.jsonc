@@ -1,0 +1,12 @@
+{
+  // Optional CLI configuration. Dashboard Git integration does not need this file.
+  // Copy to wrangler.jsonc and fill in your real D1 ID only for CLI/local development.
+  "name": "leaddashboard",
+  "compatibility_date": "2026-10-30",
+  "pages_build_output_dir": "./dist",
+  "d1_databases": [{
+    "binding": "DB",
+    "database_name": "leadroom",
+    "database_id": "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+  }]
+}
