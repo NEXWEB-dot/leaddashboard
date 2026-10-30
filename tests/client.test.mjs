@@ -1,0 +1,37 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import vm from 'node:vm';
+import { webcrypto } from 'node:crypto';
+
+// Source-level smoke checks. These do not replace visual browser inspection.
+function client(path = '/demo', session = {}) {
+  const events = {}, nodes = new Map();
+  const node = key => {
+    if (!nodes.has(key)) nodes.set(key, { innerHTML: '', textContent: '', open: false, classList: { add() {}, remove() {} }, addEventListener() {}, showModal() { this.open = true; }, close() { this.open = false; } });
+    return nodes.get(key);
+  };
+  const document = { querySelector: node, addEventListener: (name, fn) => { events[name] = fn; }, title: '', hidden: false };
+  const context = vm.createContext({ document, location: { pathname: path, hash: '', origin: 'http://localhost' }, crypto: webcrypto, URL, Intl, Date, console, navigator: {}, history: { replaceState() {} }, window: { scrollTo() {} }, setTimeout: () => 0, clearTimeout() {}, setInterval: () => 0, clearInterval() {}, fetch: async () => ({ ok: true, json: async () => session }) });
+  vm.runInContext(readFileSync(new URL('../public/app.js', import.meta.url), 'utf8'), context);
+  return { node, document, context, click: async dataset => events.click({ target: { closest: () => ({ dataset }) }, preventDefault() {} }) };
+}
+test('sample dashboard renders and all seven screens and submission dialogs open', async () => {
+  const c = client();
+  assert.match(c.node('#app').innerHTML, /Team dashboard/);
+  assert.match(c.node('#app').innerHTML, /Preview workspace/);
+  assert.match(c.node('#app').innerHTML, /rank r1/);
+  for (const [page, text] of [['leads', 'One shared pipeline'], ['leaderboard', 'By leads'], ['review', 'Great work deserves'], ['team', 'Better together'], ['activity', 'Workspace audit trail'], ['rules', '10'], ['overview', 'Daily Leads']]) {
+    await c.click({ page }); assert.match(c.node('#app').innerHTML, new RegExp(text));
+  }
+  for (const kind of ['lead', 'instagram', 'dm']) { await c.click({ add: kind }); assert.equal(c.node('#modal').open, true); assert.match(c.node('#modal').innerHTML, new RegExp(`data-kind="${kind}"`)); }
+  await c.click({ action: 'invite' }); assert.match(c.node('#modal').innerHTML, /Email address/);
+  await c.click({ action: 'close' }); assert.equal(c.node('#modal').open, false);
+});
+
+test('sign-in, initial setup, and invitation screens render without a client error', async () => {
+  for (const [path, session, expected] of [['/', { needsSetup: false, user: null }, 'Welcome back'], ['/', { needsSetup: true, user: null }, 'Private setup code'], ['/join', { needsSetup: false, user: null }, 'You’re invited']]) {
+    const c = client(path, session); await new Promise(resolve => setImmediate(resolve));
+    assert.match(c.node('#app').innerHTML, new RegExp(expected));
+  }
+});

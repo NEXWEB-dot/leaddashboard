@@ -1,0 +1,9 @@
+.git
+.env
+.env.*
+data
+tests
+node_modules
+test-results
+*.sqlite*
+README.md

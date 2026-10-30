@@ -1,0 +1,14 @@
+{
+  "name": "nexweb-leaddashboard",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "An invite-only team lead and outreach dashboard with reviewed scoring.",
+  "engines": { "node": ">=24.0.0" },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env server.mjs",
+    "dev": "node --watch --env-file-if-exists=.env server.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "check": "node --check server.mjs && node --check lib/store.mjs && node --check public/app.js && node --check scripts/reset-password.mjs"
+  }
+}
