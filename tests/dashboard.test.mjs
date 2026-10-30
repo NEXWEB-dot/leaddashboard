@@ -3,15 +3,15 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createStore, safeURL, instagramURL, rankMembers, periodStart } from '../lib/store.mjs';
+import { createStore, safeURL, instagramURL, rankMembers, periodStart, DEFAULT_GOALS } from '../lib/store.mjs';
 import { createApp } from '../server.mjs';
 
 const account = (email, name = 'Test Member') => ({ name, email, password: 'correct horse battery staple' });
 function team() {
   const store = createStore();
   const admin = store.bootstrap(account('admin@example.com', 'Test Admin'));
-  const add = (email, role = 'member') => { const invite = store.invite(admin, { email, role }); return store.join({ ...account(email), token: invite.token }); };
-  return { store, admin, reviewer: add('reviewer@example.com', 'admin'), member: add('member@example.com'), other: add('other@example.com') };
+  const add = email => { const invite = store.invite(admin, { email }); return store.join({ ...account(email), token: invite.token }); };
+  return { store, admin, member: add('member@example.com'), other: add('other@example.com') };
 }
 const leadInput = (suffix = '12345') => ({ kind: 'lead', title: 'Acme · Website redesign', url: `https://www.linkedin.com/posts/acme_activity-${suffix}-xx?utm_source=test`, country: 'USA', service: 'Website redesign', notes: 'Seeking a responsive redesign with a contact form.' });
 const postInput = (code = 'SamplePost') => ({ kind: 'instagram', title: 'Our new website showcase', url: `https://www.instagram.com/p/${code}/?igsh=tracking`, proof: 'Posted from our official team account; campaign launch.' });
@@ -44,8 +44,8 @@ test('invite-only accounts: bound to email, single use, and admin-only', () => {
   } finally { store.close(); }
 });
 
-test('10 points per post and 1 per DM, only after independent approval', () => {
-  const { store, admin, reviewer, member } = team();
+test('10 points per post and 1 per DM, only after owner approval; own reviews are audited', () => {
+  const { store, admin, member } = team();
   try {
     const lead = store.submit(member, leadInput());
     const post = store.submit(member, { ...postInput(), points: 99999, userId: admin.id, status: 'approved' });
@@ -54,8 +54,8 @@ test('10 points per post and 1 per DM, only after independent approval', () => {
     assert.equal(score().points, 0);
     throwsStatus(() => store.review(member, post.id, { decision: 'approve' }), 403);
     const own = store.submit(admin, postInput('AdminOwn'));
-    throwsStatus(() => store.review(admin, own.id, { decision: 'approve' }), 403, /own/);
-    store.review(reviewer, own.id, { decision: 'approve' });
+    store.review(admin, own.id, { decision: 'approve' });
+    assert.equal(store.state(admin).audit.some(a => a.targetId === own.id && a.action === 'submission.owner_review'), true);
     store.review(admin, post.id, { decision: 'approve' });
     assert.equal(score().points, 10);
     store.review(admin, lead.id, { decision: 'approve' });
@@ -114,6 +114,97 @@ test('rejected evidence can be resubmitted; disabling accounts revokes sessions'
   } finally { store.close(); }
 });
 
+test('only the original owner can be admin; invite and promotion tampering is blocked', () => {
+  const { store, admin, member } = team();
+  try {
+    throwsStatus(() => store.invite(admin, { email: 'extra-admin@example.com', role: 'admin' }), 403);
+    throwsStatus(() => store.updateMember(admin, member.id, { role: 'admin', active: true }), 403);
+    throwsStatus(() => store.updateMember(member, admin.id, { active: false }), 403);
+    const invite = store.invite(admin, { email: 'injected@example.com' });
+    // Emulate a legacy invite or tampered client role. Neither can grant admin.
+    store.db.prepare("UPDATE invites SET role='admin' WHERE email='injected@example.com'").run();
+    const joined = store.join({ ...account('injected@example.com'), token: invite.token, role: 'admin' });
+    assert.equal(joined.role, 'member');
+    assert.equal(store.state(admin).members.filter(m => m.role === 'admin').length, 1);
+    assert.throws(() => store.db.prepare("UPDATE users SET role='admin' WHERE id=?").run(member.id), /UNIQUE/);
+  } finally { store.close(); }
+});
+
+test('verified client outcomes award 5/20/50 only after approval, stay private, and revoke with the lead', () => {
+  const { store, admin, member, other } = team();
+  try {
+    const lead = store.submit(member, leadInput());
+    const claim = kind => ({ kind, title: 'Outcome claim', leadId: lead.id, url: `https://example.com/proof?record=${kind}`, proof: 'Verified recipient, date, and original evidence for this outcome.' });
+    throwsStatus(() => store.submit(member, claim('reply')), 400);
+    store.review(admin, lead.id, { decision: 'approve' });
+    throwsStatus(() => store.submit(other, claim('win')), 403);
+    const score = () => store.state(member).leaderboards['all:points'].find(m => m.id === member.id);
+    const reply = store.submit(member, claim('reply'));
+    assert.equal(reply.url, 'https://example.com/proof?record=reply');
+    assert.equal(score().points, 0);
+    throwsStatus(() => store.review(member, reply.id, { decision: 'approve' }), 403);
+    store.review(admin, reply.id, { decision: 'approve' });
+    assert.equal(score().points, 5); assert.equal(score().replies, 1);
+    throwsStatus(() => store.submit(member, claim('reply')), 409);
+    const call = store.submit(member, claim('call'));
+    store.review(admin, call.id, { decision: 'reject', reason: 'Need confirmed booking evidence.' });
+    store.resubmit(member, call.id, { evidence: 'Confirmed booking for Monday with the prospect, original booking attached.' });
+    store.review(admin, call.id, { decision: 'approve' });
+    assert.equal(score().points, 25); assert.equal(score().calls, 1);
+    const win = store.submit(member, claim('win'));
+    store.review(admin, win.id, { decision: 'approve' });
+    assert.equal(score().points, 75); assert.equal(score().wins, 1);
+    assert.equal(store.state(admin).submissions.find(s => s.id === lead.id).stage, 'won');
+    const privateRow = store.state(other).submissions.find(s => s.id === win.id);
+    assert.equal(privateRow.url, ''); assert.equal(privateRow.proof, '');
+    store.update(member, lead.id, { stage: 'won', followUp: '', notes: 'A pipeline note alone should never add bonus points.' });
+    assert.equal(score().points, 75);
+    store.review(admin, lead.id, { decision: 'revoke', reason: 'Prospect identity could not be verified.' });
+    assert.equal(score().points, 0); assert.equal(score().wins, 0);
+    for (const id of [reply.id, call.id, win.id]) assert.equal(store.state(admin).submissions.find(s => s.id === id).status, 'rejected');
+  } finally { store.close(); }
+});
+
+test('weekly goals are validated, owner-only, audited, and persisted across restarts', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'leadroom-goals-'));
+  let store = createStore(join(dir, 'goals.sqlite'));
+  try {
+    const admin = store.bootstrap(account('admin@example.com'));
+    const invite = store.invite(admin, { email: 'member@example.com' });
+    const member = store.join({ ...account('member@example.com'), token: invite.token });
+    throwsStatus(() => store.setGoals(member, DEFAULT_GOALS), 403);
+    for (const value of [0, -1, 1.5, '10', 100001]) throwsStatus(() => store.setGoals(admin, { ...DEFAULT_GOALS, leads: value }), 400);
+    const updated = { ...DEFAULT_GOALS, leads: 20, teamPoints: 650 };
+    store.setGoals(admin, updated);
+    assert.deepEqual(store.state(member).goals, updated);
+    assert.equal(store.state(admin).audit[0].action, 'goals.updated');
+    store.close(); store = createStore(join(dir, 'goals.sqlite'));
+    assert.deepEqual(store.state(admin).goals, updated);
+  } finally { store.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('an older database keeps its original owner and converts extra admins and pending admin invites', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'leadroom-owner-'));
+  let store = createStore(join(dir, 'legacy.sqlite'));
+  try {
+    const owner = store.bootstrap(account('owner@example.com'));
+    const invite = store.invite(owner, { email: 'former-admin@example.com' });
+    const former = store.join({ ...account('former-admin@example.com'), token: invite.token });
+    const pending = store.invite(owner, { email: 'pending@example.com' });
+    const session = store.createSession(former.id);
+    store.db.exec('DROP INDEX users_one_admin');
+    store.db.prepare("UPDATE users SET role='admin' WHERE id=?").run(former.id);
+    store.db.prepare("UPDATE invites SET role='admin' WHERE email='pending@example.com'").run();
+    store.close(); store = createStore(join(dir, 'legacy.sqlite'));
+    const members = store.state(owner).members;
+    assert.equal(members.find(m => m.id === owner.id).role, 'admin');
+    assert.equal(members.find(m => m.id === former.id).role, 'member');
+    assert.equal(store.session(session.token), null);
+    assert.equal(store.join({ ...account('pending@example.com'), token: pending.token }).role, 'member');
+    assert.equal(store.state(owner).audit.some(a => a.action === 'member.admin_removed'), true);
+  } finally { store.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('rank ties and Monday/month boundaries use Karachi time', () => {
   const monday = new Date('2026-10-26T00:00:00+05:00');
   assert.equal(periodStart('week', monday), '2026-10-25T19:00:00.000Z');
@@ -163,14 +254,17 @@ test('HTTP: bootstrap token, protected APIs, CSRF, origin, cookies, static pages
     assert.equal((await request('/api/invites', { email: 'member@example.com' }, { 'X-CSRF-Token': 'wrong' })).res.status, 403);
     assert.equal((await request('/api/invites', { email: 'member@example.com' }, { Origin: 'https://evil.example' })).res.status, 403);
     const invitation = await request('/api/invites', { email: 'member@example.com' }); assert.equal(invitation.res.status, 201);
+    assert.equal((await request('/api/invites', { email: 'second-admin@example.com', role: 'admin' })).res.status, 403);
+    assert.equal((await request('/api/goals', { ...DEFAULT_GOALS, teamPoints: 600 })).res.status, 200);
     const post = await request('/api/submissions', postInput()); assert.equal(post.res.status, 201);
-    assert.equal((await request(`/api/submissions/${post.data.id}/review`, { decision: 'approve' })).res.status, 403);
+    assert.equal((await request(`/api/submissions/${post.data.id}/review`, { decision: 'approve' })).res.status, 200);
     await request('/api/logout', {});
     assert.equal((await request('/api/state')).res.status, 401);
     assert.equal((await request('/api/join', { ...account('member@example.com'), token: invitation.data.token })).res.status, 200);
     assert.equal((await request('/api/invites', { email: 'another@example.com' })).res.status, 403);
     assert.equal((await request('/api/state')).data.user.role, 'member');
-    for (const path of ['/', '/demo', '/join', '/styles.css', '/material.css', '/app.js', '/favicon.svg']) {
+    assert.equal((await request('/api/goals', DEFAULT_GOALS)).res.status, 403);
+    for (const path of ['/', '/demo', '/join', '/styles.css', '/material.css', '/goals.css', '/app.js', '/favicon.svg']) {
       const { res } = await request(path); assert.equal(res.status, 200); assert.match(res.headers.get('content-security-policy'), /frame-ancestors 'none'/);
     }
     assert.equal((await request('/.env')).res.status, 404);

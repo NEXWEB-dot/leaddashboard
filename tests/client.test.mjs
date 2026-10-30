@@ -16,17 +16,41 @@ function client(path = '/demo', session = {}) {
   vm.runInContext(readFileSync(new URL('../public/app.js', import.meta.url), 'utf8'), context);
   return { node, document, context, click: async dataset => events.click({ target: { closest: () => ({ dataset }) }, preventDefault() {} }) };
 }
-test('sample dashboard renders and all seven screens and submission dialogs open', async () => {
+test('sample dashboard renders and all eight screens and submission dialogs open', async () => {
   const c = client();
   assert.match(c.node('#app').innerHTML, /Team dashboard/);
   assert.match(c.node('#app').innerHTML, /Preview workspace/);
   assert.match(c.node('#app').innerHTML, /rank r1/);
-  for (const [page, text] of [['leads', 'One shared pipeline'], ['leaderboard', 'By leads'], ['review', 'Great work deserves'], ['team', 'Better together'], ['activity', 'Workspace audit trail'], ['rules', '10'], ['overview', 'Daily Leads']]) {
+  for (const [page, text] of [['goals', 'Your weekly goals'], ['leads', 'One shared pipeline'], ['leaderboard', 'By leads'], ['review', 'Great work deserves'], ['team', 'Better together'], ['activity', 'Workspace audit trail'], ['rules', '10'], ['overview', 'Daily Leads']]) {
     await c.click({ page }); assert.match(c.node('#app').innerHTML, new RegExp(text));
   }
   for (const kind of ['lead', 'instagram', 'dm']) { await c.click({ add: kind }); assert.equal(c.node('#modal').open, true); assert.match(c.node('#modal').innerHTML, new RegExp(`data-kind="${kind}"`)); }
   await c.click({ action: 'invite' }); assert.match(c.node('#modal').innerHTML, /Email address/);
+  assert.doesNotMatch(c.node('#modal').innerHTML, /name="role"/);
+  await c.click({ action: 'outcome' }); assert.match(c.node('#modal').innerHTML, /Client won · 50 points/);
+  await c.click({ action: 'edit-goals' }); assert.match(c.node('#modal').innerHTML, /name="teamPoints"/);
   await c.click({ action: 'close' }); assert.equal(c.node('#modal').open, false);
+});
+
+test('goal progress, recognition, shared celebrations, and self-review controls follow approved data', async () => {
+  const c = client();
+  await c.click({ page: 'goals' });
+  assert.match(c.node('#app').innerHTML, /Your achievements/);
+  assert.match(c.node('#app').innerHTML, /Client closer/);
+  assert.match(c.node('#app').innerHTML, /Everyone’s progress/);
+  vm.runInContext("state.goals.teamPoints = 1", c.context);
+  await c.click({ page: 'goals' });
+  assert.match(c.node('#app').innerHTML, /You did it, together!/);
+  await c.click({ page: 'review' });
+  const ownId = vm.runInContext("state.submissions.find(s => s.status === 'pending' && s.userId === state.user.id).id", c.context);
+  assert.match(c.node('#app').innerHTML, new RegExp(`data-approve="${ownId}"`));
+  await c.click({ approve: ownId });
+  assert.equal(vm.runInContext(`state.submissions.find(s => s.id === '${ownId}').status`, c.context), 'approved');
+  vm.runInContext("state.user = state.members[1]", c.context);
+  await c.click({ page: 'goals' });
+  assert.doesNotMatch(c.node('#app').innerHTML, /data-action="edit-goals"/);
+  await c.click({ page: 'review' });
+  assert.doesNotMatch(c.node('#app').innerHTML, /data-approve=/);
 });
 
 test('sign-in, initial setup, and invitation screens render without a client error', async () => {
