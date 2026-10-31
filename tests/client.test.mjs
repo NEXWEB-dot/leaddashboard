@@ -5,14 +5,14 @@ import vm from 'node:vm';
 import { webcrypto } from 'node:crypto';
 
 // Source-level smoke checks. These do not replace visual browser inspection.
-function client(path = '/demo', session = {}) {
+function client(path = '/demo', session = {}, hash = '') {
   const events = {}, nodes = new Map();
   const node = key => {
     if (!nodes.has(key)) nodes.set(key, { innerHTML: '', textContent: '', open: false, classList: { add() {}, remove() {} }, addEventListener() {}, showModal() { this.open = true; }, close() { this.open = false; } });
     return nodes.get(key);
   };
   const document = { querySelector: node, addEventListener: (name, fn) => { events[name] = fn; }, title: '', hidden: false };
-  const context = vm.createContext({ document, location: { pathname: path, hash: '', origin: 'http://localhost' }, crypto: webcrypto, URL, Intl, Date, console, navigator: {}, history: { replaceState() {} }, window: { scrollTo() {} }, setTimeout: () => 0, clearTimeout() {}, setInterval: () => 0, clearInterval() {}, fetch: async () => ({ ok: true, json: async () => session }) });
+  const context = vm.createContext({ document, location: { pathname: path, hash, origin: 'http://localhost' }, crypto: webcrypto, URL, Intl, Date, console, navigator: {}, history: { replaceState() {} }, window: { scrollTo() {} }, setTimeout: () => 0, clearTimeout() {}, setInterval: () => 0, clearInterval() {}, fetch: async () => ({ ok: true, json: async () => session }) });
   vm.runInContext(readFileSync(new URL('../public/app.js', import.meta.url), 'utf8'), context);
   return { node, document, context, click: async dataset => events.click({ target: { closest: () => ({ dataset }) }, preventDefault() {} }) };
 }
@@ -57,5 +57,23 @@ test('sign-in, initial setup, and invitation screens render without a client err
   for (const [path, session, expected] of [['/', { needsSetup: false, user: null }, 'Welcome back'], ['/', { needsSetup: true, user: null }, 'Private setup code'], ['/join', { needsSetup: false, user: null }, 'You’re invited']]) {
     const c = client(path, session); await new Promise(resolve => setImmediate(resolve));
     assert.match(c.node('#app').innerHTML, new RegExp(expected));
+  }
+});
+
+test('invitation fragments open account creation after Pages redirects the join route to the homepage', async () => {
+  const token = '1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef';
+  for (const path of ['/', '/join', '/join/']) {
+    const c = client(path, { needsSetup: false, user: null }, `#${token}`);
+    await new Promise(resolve => setImmediate(resolve));
+    const html = c.node('#app').innerHTML;
+    assert.match(html, /data-form="join"/);
+    assert.match(html, /name="name"/);
+    assert.match(html, /autocomplete="new-password"/);
+    assert.match(html, /minlength="12"/);
+  }
+  for (const hash of ['', '#overview', '#deadbeef']) {
+    const c = client('/', { needsSetup: false, user: null }, hash);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.match(c.node('#app').innerHTML, /data-form="login"/);
   }
 });
