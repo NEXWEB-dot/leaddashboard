@@ -22,7 +22,7 @@ test('sample dashboard renders and all eight screens and submission dialogs open
   assert.match(c.node('#app').innerHTML, /My work/);
   assert.match(c.node('#app').innerHTML, /Preview workspace/);
   assert.match(c.node('#app').innerHTML, /rank r1/);
-  for (const [page, text] of [['goals', 'Your weekly goals'], ['leads', 'One shared pipeline'], ['leaderboard', 'By leads'], ['review', 'Review contributions'], ['team', 'Your team'], ['activity', 'Workspace audit trail'], ['rules', '10'], ['overview', 'Your next steps']]) {
+  for (const [page, text] of [['goals', 'Your weekly goals'], ['leads', 'One shared pipeline'], ['leaderboard', 'By leads'], ['review', 'Review contributions'], ['team', 'Your team'], ['activity', 'Workspace audit trail'], ['rules', '10'], ['overview', 'Your activities']]) {
     await c.click({ page }); assert.match(c.node('#app').innerHTML, new RegExp(text));
   }
   for (const kind of ['lead', 'instagram', 'dm']) { await c.click({ add: kind }); assert.equal(c.node('#modal').open, true); assert.match(c.node('#modal').innerHTML, new RegExp(`data-kind="${kind}"`)); }
@@ -37,7 +37,7 @@ test('personal home and badges use compact summary totals rather than the recent
   const c=client();
   vm.runInContext(`state.compact=true; state.lifetime={ [state.user.id]:{lead:200,instagram:5,dm:120,reply:30,call:10,win:3} }; state.leaderboards={'week:points':[{...state.user,rank:1,leads:123,posts:5,dms:55,replies:4,calls:2,wins:1,points:177}]}; state.myPendingCount=7; state.daily={lead:[9,0,0,0,0,0,0]};`,c.context);
   await c.click({page:'overview'});
-  assert.match(c.node('#app').innerHTML,/Your next steps/);
+  assert.match(c.node('#app').innerHTML,/Your activities/);
   assert.match(c.node('#app').innerHTML,/123/);
   assert.match(c.node('#app').innerHTML,/177/);
   const badges=vm.runInContext('achievements(state.user)',c.context);
@@ -59,7 +59,7 @@ test('compact refresh handles 304 without parsing JSON or replacing data', async
   await vm.runInContext('refresh(false,true)',c.context);
   assert.equal(calls.filter(r=>r.url.endsWith('/dashboard')).length,2);
   assert.equal(vm.runInContext('state.pendingCount',c.context),3);
-  assert.match(c.node('#app').innerHTML,/Your next steps/);
+  assert.match(c.node('#app').innerHTML,/Your activities/);
 });
 
 test('late list responses cannot overwrite a newer search',async()=>{
@@ -152,6 +152,26 @@ test('mobile navigation opens explicitly and closes when a destination is select
   await c.click({page:'leads'});
   assert.equal(vm.runInContext('navOpen',c.context),false);
   assert.match(c.node('#app').innerHTML,/aria-expanded="false"/);
+});
+
+test('calendar navigation shows real month boundaries and returns to the current month',async()=>{
+  const c=client();
+  const initial=vm.runInContext('calendarPanel()',c.context);
+  await c.click({calendar:'next'});
+  assert.equal(vm.runInContext('calendarOffset',c.context),1);
+  assert.notEqual(vm.runInContext('calendarPanel()',c.context),initial);
+  await c.click({calendar:'today'});
+  assert.equal(vm.runInContext('calendarOffset',c.context),0);
+  assert.equal(vm.runInContext('calendarPanel()',c.context),initial);
+});
+
+test('workspace search opens the real filtered lead list',async()=>{
+  const c=client();c.context.FormData=class{constructor(form){this.values=form.values;}[Symbol.iterator](){return Object.entries(this.values)[Symbol.iterator]();}};
+  c.context.testForm={dataset:{form:'quick-search'},querySelector:()=>null,values:{query:'Studio'}};
+  await vm.runInContext('onSubmit({target:{closest:()=>testForm},preventDefault(){}})',c.context);
+  assert.equal(vm.runInContext('page',c.context),'leads');
+  assert.equal(vm.runInContext('query',c.context),'Studio');
+  assert.match(c.node('#app').innerHTML,/Studio North/);
 });
 
 test('goal progress, recognition, shared celebrations, and self-review controls follow approved data', async () => {

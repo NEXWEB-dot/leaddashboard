@@ -10,7 +10,7 @@ test('Pages build fingerprints assets, revalidates entry pages, and keeps route 
   const root=mkdtempSync(join(tmpdir(),'leadroom-build-'));
   try{
     mkdirSync(join(root,'public'));
-    for(const name of ['index.html','app.js','styles.css','material.css','goals.css','enterprise.css','favicon.svg'])copyFileSync(new URL(`../public/${name}`,import.meta.url),join(root,'public',name));
+    for(const name of ['index.html','app.js','styles.css','material.css','goals.css','enterprise.css','favicon.svg','Manrope.ttf','Manrope-OFL.txt'])copyFileSync(new URL(`../public/${name}`,import.meta.url),join(root,'public',name));
     writeFileSync(join(root,'private-secret.txt'),'must not publish');
     const build=()=>execFileSync(process.execPath,[fileURLToPath(new URL('../scripts/build-pages.mjs',import.meta.url))],{cwd:root,stdio:'pipe'});
     build();
@@ -19,6 +19,9 @@ test('Pages build fingerprints assets, revalidates entry pages, and keeps route 
     assert.ok(script,'entry page must use a content-fingerprinted script');
     assert.ok(existsSync(join(root,'dist',script)));
     assert.match(html,/\/assets\/enterprise\.[a-f0-9]+\.css/);
+    const stylesheet=html.match(/href="(\/assets\/enterprise\.[a-f0-9]+\.css)"/)[1];
+    const styles=readFileSync(join(root,'dist',stylesheet),'utf8');
+    assert.match(styles,/\/assets\/Manrope\.[a-f0-9]+\.ttf/);
     assert.equal(readFileSync(join(root,'dist/join/index.html'),'utf8'),html);
     assert.equal(readFileSync(join(root,'dist/demo/index.html'),'utf8'),html);
     assert.equal(existsSync(join(root,'dist/_redirects')),false);
