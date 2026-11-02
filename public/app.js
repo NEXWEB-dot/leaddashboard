@@ -29,7 +29,7 @@ const demo = /^\/demo\/?$/.test(location.pathname);
 let state, csrf, needsSetup = false, setupLocation = 'local', page = 'overview', period = 'week', metric = 'points', query = '', filter = 'all', country = 'all', mine = false, toastTimer, refreshTimer;
 let compactMode=false, lastEtag='', lastSync=0, lastActivity=Date.now(), refreshing=null, failures=0, retryAt=0, listSequence=0, searchTimer, eligibleTimer, eligibleSequence=0, eligibleItems=[];
 let exporting=false, eligiblePage={key:'',nextCursor:'',cursors:[''],index:0};
-let navOpen=false,calendarOffset=0;
+let navOpen=false;
 let recordPage={view:'',items:[],nextCursor:'',cursors:[''],index:0,loading:false,error:''};
 const labels = { overview: 'My work', goals: 'Goals & wins', leads: 'Leads', leaderboard: 'Leaderboard', review: 'Reviews', team: 'Team', activity: 'Activity log', rules: 'How it works' };
 const kindLabel = { lead: 'Lead', instagram: 'Instagram post', dm: 'DM', reply: 'Client reply', call: 'Booked call', win: 'Client won' };
@@ -198,17 +198,6 @@ function leaderboardTable(full = false) {
 function activityList() {
   return `<div class="activity-list">${(state.recentSubmissions||state.submissions).slice(0, 5).map(s => `<div class="activity-item"><span class="activity-icon ${s.kind}">${icon(kindIcon(s.kind))}</span><div class="activity-text"><strong>${esc(person(s.userId).name.split(' ')[0])}</strong> ${s.kind === 'lead' ? 'added a lead' : s.kind === 'instagram' ? 'submitted a post' : s.kind === 'dm' ? 'logged a DM' : s.kind === 'reply' ? 'got a client reply' : s.kind === 'call' ? 'booked a call' : 'won a client'}<p>${esc(s.title)}</p><time datetime="${s.createdAt}">${relative(s.createdAt)}</time></div><span class="activity-score ${s.status !== 'approved' ? 'pending' : ''}">${s.status === 'approved' ? s.kind === 'lead' ? 'Verified' : `+${state.scoring[s.kind]} pts` : s.status === 'pending' ? 'In review' : 'Rejected'}</span></div>`).join('') || '<p class="muted-text">Your team’s first contribution will appear here.</p>'}</div>`;
 }
-function calendarPanel(){
-  const localNow=new Date(Date.now()+5*3600000),current=new Date(Date.UTC(localNow.getUTCFullYear(),localNow.getUTCMonth()+calendarOffset,1));
-  const year=current.getUTCFullYear(),month=current.getUTCMonth(),leading=(current.getUTCDay()+6)%7,days=new Date(Date.UTC(year,month+1,0)).getUTCDate();
-  const todayKey=localNow.toISOString().slice(0,10),weekKey=new Date(new Date(start('week')).getTime()+5*3600000).toISOString().slice(0,10),weekEnd=new Date(new Date(start('week')).getTime()+5*3600000+6*86400000).toISOString().slice(0,10);
-  const label=new Intl.DateTimeFormat('en',{month:'long',year:'numeric',timeZone:'UTC'}).format(current),cells=[];
-  for(let i=0;i<Math.ceil((leading+days)/7)*7;i++){
-    const d=new Date(Date.UTC(year,month,i-leading+1)),key=d.toISOString().slice(0,10),outside=d.getUTCMonth()!==month;
-    cells.push(`<td><time datetime="${key}" class="calendar-day ${outside?'outside':''} ${key>=weekKey&&key<=weekEnd&&!outside?'this-week':''} ${key===todayKey?'is-today':''}" ${key===todayKey?'aria-current="date"':''}>${d.getUTCDate()}</time></td>`);
-  }
-  return `<section class="calendar-panel"><div class="calendar-heading"><h3>${label}</h3><div><button class="icon-btn previous-month" data-calendar="previous" aria-label="Previous month">${icon('arrow')}</button><button class="icon-btn" data-calendar="next" aria-label="Next month">${icon('arrow')}</button></div></div><table class="pastel-calendar"><caption class="visually-hidden">${label} calendar. Current week highlighted.</caption><thead><tr>${['Mon','Tue','Wed','Thu','Fri','Sat','Sun'].map(day=>`<th scope="col">${day}</th>`).join('')}</tr></thead><tbody>${Array.from({length:cells.length/7},(_,i)=>`<tr>${cells.slice(i*7,i*7+7).join('')}</tr>`).join('')}</tbody></table><div class="calendar-footer"><span><i></i>Current week</span><button class="text-btn" data-calendar="today">Today</button></div></section>`;
-}
 function peopleStack(){
   const people=state.members.filter(m=>m.active);
   return `<span class="people-stack" aria-label="${people.length} workspace members">${people.slice(0,4).map(m=>`<span title="${esc(m.name)}">${avatar(m)}</span>`).join('')}${people.length>4?`<span class="people-more">+${people.length-4}</span>`:''}</span>`;
@@ -230,7 +219,7 @@ function personalHome(){
       <div class="pastel-metrics">${metricCards.map(([label,value,tone,destination,homeFilter])=>`<button class="pastel-metric ${tone}" data-page="${destination}" ${homeFilter?`data-home-filter="${homeFilter}"`:''}><span>${label}</span><div><strong>${Number(value).toLocaleString()}</strong><span class="round-arrow">${icon('arrow')}</span></div></button>`).join('')}</div>
       <div class="pastel-goals">${goalCard('yellow','Lead sourcing',w.personal.leads,w.goals.leads,'approved leads')}${goalCard('pink','Contribution points',w.personal.points,w.goals.points,'verified points')}</div>
       <section class="pastel-recent"><div class="pastel-section-heading"><h2>Recent submissions</h2><button class="text-btn" data-page="review">Open submissions ${icon('arrow')}</button></div>${recentRows}</section>
-    </div><aside class="pastel-right-column"><div class="pastel-section-heading"><h2>Calendar</h2></div>${calendarPanel()}
+    </div><aside class="pastel-right-column">
       <div class="pastel-side-actions"><button class="pastel-side-action mint" data-add="instagram"><span class="side-action-icon">${icon('instagram')}</span><span><strong>Submit an Instagram post</strong><small>10 points after approval</small></span>${icon('arrow')}</button><button class="pastel-side-action mint" data-action="outcome"><span class="side-action-icon">${icon('check')}</span><span><strong>Log client progress</strong><small>A reply, booked call, or new client</small></span>${icon('arrow')}</button><button class="pastel-side-action mint" data-page="review"><span class="side-action-icon">${icon('shield')}</span><span><strong>${state.user.role==='admin'?'Review contributions':'My submissions'}</strong><small>${state.user.role==='admin'?allPending:pending} awaiting review</small></span>${icon('arrow')}</button></div>
       <section class="pastel-standings"><div class="pastel-section-heading"><h2>Team standings</h2><button class="text-btn" data-page="leaderboard" aria-label="Full leaderboard">${icon('external')}</button></div><ol class="standings-list">${leaders.map(m=>`<li class="standings-row ${m.id===state.user.id?'is-you':''}"><span class="rank r${m.rank}">${m.rank}</span>${avatar(m)}<span class="standings-name">${esc(m.name)}${m.id===state.user.id?'<small>You</small>':''}</span><strong>${m.points}<small>pts</small></strong></li>`).join('')||'<li class="standings-empty">Approved contributions appear here.</li>'}</ol></section>
     </aside></div>`;
@@ -483,7 +472,6 @@ document.addEventListener('click', async event => {
   lastActivity=Date.now();
   const el = event.target.closest('button,a'); if (!el) return;
   try {
-  if(el.dataset.calendar){if(el.dataset.calendar==='today')calendarOffset=0;else calendarOffset=Math.max(-120,Math.min(120,calendarOffset+(el.dataset.calendar==='next'?1:-1)));render();return;}
   if(el.dataset.eligible){await refreshEligibleOptions(el.dataset.eligible);return;}
   if(el.dataset.records){await loadRecords(el.dataset.records==='retry',true,el.dataset.records);return;}
   if (el.dataset.page) { event.preventDefault(); page = el.dataset.page; navOpen=false; ++listSequence; filter = 'all'; query = ''; if(el.dataset.homeFilter){mine=el.dataset.homeFilter==='approved';filter=mine?'approved':'all';country='all';} recordPage={view:'',items:[],nextCursor:'',cursors:[''],index:0,loading:false,error:''}; render(true); if(compactMode)await loadRecords(true);window.scrollTo({ top: 0, behavior: 'instant' }); }
