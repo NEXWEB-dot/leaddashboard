@@ -25,9 +25,12 @@ const paths = {
 const icon = name => `<svg viewBox="0 0 24 24" aria-hidden="true">${paths[name] || paths.leads}</svg>`;
 const brand = extra => `<div class="brand ${extra || ''}"><span class="brand-mark">L</span><div>Leadroom<small>BY NEXWEB</small></div></div>`;
 const app = $('#app'), modal = $('#modal');
-const demo = location.pathname === '/demo';
+const demo = /^\/demo\/?$/.test(location.pathname);
 let state, csrf, needsSetup = false, setupLocation = 'local', page = 'overview', period = 'week', metric = 'points', query = '', filter = 'all', country = 'all', mine = false, toastTimer, refreshTimer;
-const labels = { overview: 'Overview', goals: 'Goals & wins', leads: 'Lead pipeline', leaderboard: 'Leaderboard', review: 'Review queue', team: 'Team members', activity: 'Activity log', rules: 'Scoring & trust' };
+let compactMode=false, lastEtag='', lastSync=0, lastActivity=Date.now(), refreshing=null, failures=0, retryAt=0, listSequence=0, searchTimer, eligibleTimer, eligibleSequence=0, eligibleItems=[];
+let exporting=false, eligiblePage={key:'',nextCursor:'',cursors:[''],index:0};
+let recordPage={view:'',items:[],nextCursor:'',cursors:[''],index:0,loading:false,error:''};
+const labels = { overview: 'My work', goals: 'Goals & wins', leads: 'Leads', leaderboard: 'Leaderboard', review: 'Reviews', team: 'Team', activity: 'Activity log', rules: 'How it works' };
 const kindLabel = { lead: 'Lead', instagram: 'Instagram post', dm: 'DM', reply: 'Client reply', call: 'Booked call', win: 'Client won' };
 const kindIcon = kind => ({ lead: 'leads', reply: 'dm', call: 'clock', win: 'trophy' }[kind] || kind);
 const defaultGoals = { leads: 10, posts: 3, dms: 10, replies: 2, calls: 1, wins: 1, points: 100, teamPoints: 400 };
@@ -64,15 +67,81 @@ function rankings(selectedPeriod = period, selectedMetric = metric) {
   return result.map((m, i) => { if (!i || m[selectedMetric] !== result[i - 1][selectedMetric] || m[secondary] !== result[i - 1][secondary]) rank = i + 1; return { ...m, rank }; });
 }
 function showToast(message) { const el = $('#toast'); el.textContent = message; el.classList.add('visible'); clearTimeout(toastTimer); toastTimer = setTimeout(() => el.classList.remove('visible'), 4500); }
-async function api(path, data) {
-  const response = await fetch(`/api/${path}`, { method: data ? 'POST' : 'GET', credentials: 'same-origin', headers: { ...(data ? { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf || '' } : {}) }, ...(data ? { body: JSON.stringify(data) } : {}) });
-  const result = await response.json();
-  if (!response.ok) { if (response.status === 401 && state) { state = null; clearInterval(refreshTimer); renderAuth(); } throw new Error(result.error || 'Request failed.'); }
-  return result;
+async function api(path, data, options={}) {
+  const controller=typeof AbortController!=='undefined'?new AbortController():null;
+  const timeout=controller?setTimeout(()=>controller.abort(),20000):0;
+  try {
+    const response = await fetch(`/api/${path}`, { method: data ? 'POST' : 'GET', credentials: 'same-origin', cache:'no-store', headers: { ...(data ? { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf || '' } : {}),...options.headers }, ...(data ? { body: JSON.stringify(data) } : {}),...(controller?{signal:controller.signal}:{}) });
+    if(response.status===304)return {unchanged:true};
+    const result = await response.json().catch(()=>({error:'The service is temporarily unavailable. Please try again.'}));
+    if (!response.ok) {
+      if (response.status === 401 && state) { state = null; lastEtag=''; clearInterval(refreshTimer); renderAuth(); }
+      throw Object.assign(new Error(result.error || 'Request failed.'),{status:response.status,retryAfter:Number(response.headers?.get('retry-after'))||60});
+    }
+    if(path==='dashboard')lastEtag=response.headers?.get('etag')||'';
+    return result;
+  } finally {if(timeout)clearTimeout(timeout);}
 }
-async function refresh(renderPage = true) {
-  if (!demo) state = await api('state');
-  if (renderPage) render();
+async function refresh(renderPage = true,conditional=false) {
+  while(refreshing){await refreshing;if(conditional)return;}
+  const work=(async()=>{
+    let changed=false;
+    if(!demo){
+      const next=await api(compactMode?'dashboard':'state',undefined,conditional&&lastEtag?{headers:{'If-None-Match':lastEtag}}:{});
+      if(!next.unchanged){state=next;changed=true;if(compactMode&&['leads','review'].includes(page))await loadRecords(true,false);}
+    }
+    lastSync=Date.now(); failures=0;retryAt=0;
+    if(renderPage||changed)render(); else syncLabel();
+  })();
+  refreshing=work;
+  try{await work;}finally{if(refreshing===work)refreshing=null;}
+}
+function syncLabel(message=''){
+  const el=$('#sync-status');if(!el)return;
+  el.textContent=message|| (demo?'Preview workspace':lastSync?`Updated ${new Date(lastSync).toLocaleTimeString('en',{hour:'numeric',minute:'2-digit'})}`:'Connecting…');
+  el.classList[message?'add':'remove']('offline');
+}
+function listParams(view=page==='review'?'review':'leads'){
+  return new URLSearchParams({view,filter,country:page==='review'?'all':country,mine:mine?'1':'0',query:page==='review'?'':query});
+}
+async function loadRecords(reset=true,renderPage=true,direction=''){
+  if(!compactMode||!['leads','review'].includes(page))return;
+  if(!reset&&recordPage.loading)return;
+  const sequence=++listSequence, view=page==='review'?'review':'leads', params=listParams(view);
+  let cursors=reset?['']:[...recordPage.cursors], index=reset?0:recordPage.index;
+  if(direction==='next'){cursors=cursors.slice(0,index+1);cursors.push(recordPage.nextCursor);index++;}
+  if(direction==='previous')index=Math.max(0,index-1);
+  params.set('cursor',cursors[index]||'');
+  recordPage={...recordPage,view,loading:true,error:''};
+  try{
+    const result=await api(`records?${params}`);
+    if(sequence!==listSequence||view!==(page==='review'?'review':'leads'))return;
+    recordPage={view,items:result.items,nextCursor:result.nextCursor,cursors,index,loading:false,error:''};
+    state.recentSubmissions??=state.submissions.slice(0,20);
+    const rows=new Map([...state.recentSubmissions,...result.items].map(r=>[r.id,r]));
+    state.submissions=[...rows.values()];
+  }catch(error){if(sequence!==listSequence)return;recordPage={...recordPage,loading:false,error:error.message};}
+  if(renderPage){if(page==='leads')$('#lead-results').innerHTML=leadRows()+pager();else render();}
+}
+function pager(){
+  if(!compactMode)return '';
+  const count=recordPage.items.length;
+  return `<div class="list-pagination"><span>${recordPage.loading?'Loading…':count?`Showing ${recordPage.index*50+1}–${recordPage.index*50+count}`:'No results'}</span><div><button class="btn small" data-records="previous" ${recordPage.index===0||recordPage.loading?'disabled':''}>Previous</button><button class="btn small" data-records="next" ${!recordPage.nextCursor||recordPage.loading?'disabled':''}>Next ${icon('arrow')}</button></div></div>`;
+}
+async function loadEligible(kind='dm',search='',direction=''){
+  const sequence=++eligibleSequence;
+  const key=`${kind}:${search}`,reset=!direction||key!==eligiblePage.key;
+  let cursors=reset?['']:[...eligiblePage.cursors],index=reset?0:eligiblePage.index;
+  if(direction==='next'&&!reset){if(!eligiblePage.nextCursor)return false;cursors=cursors.slice(0,index+1);cursors.push(eligiblePage.nextCursor);index++;}
+  if(direction==='previous'&&!reset)index=Math.max(0,index-1);
+  const result=await api(`records?${new URLSearchParams({view:'eligible',claim:kind,query:search,cursor:cursors[index]||''})}`);
+  if(sequence!==eligibleSequence)return false;
+  eligibleItems=result.items;eligiblePage={key,nextCursor:result.nextCursor,cursors,index};return true;
+}
+const leadChoice=l=>[l.id,`${l.title} · ${date(l.createdAt)}`];
+function eligibleControls(){return `<div id="eligible-pages" class="list-pagination"><span>Page ${eligiblePage.index+1}</span><div><button type="button" class="btn small" data-eligible="previous" ${eligiblePage.index===0?'disabled':''}>Previous</button><button type="button" class="btn small" data-eligible="next" ${!eligiblePage.nextCursor?'disabled':''}>Next</button></div></div>`;}
+function eligiblePicker(label,rows){
+  return `${compactMode?'<label class="field"><span class="field-label">Find an approved lead</span><input type="search" id="eligible-search" maxlength="120" placeholder="Search your approved leads…"><small>Search or move between pages to find an older lead.</small></label>':''}${select('leadId',label,rows.length?rows.map(leadChoice):[['','No matching eligible leads']])}${compactMode?`${eligibleControls()}<a id="eligible-source" class="detail-link" href="${esc(rows[0]?.url||'')}" target="_blank" rel="noopener noreferrer" ${!rows.length?'hidden':''}>Open selected lead’s source ${icon('external')}</a>`:''}`;
 }
 function seedDemo() {
   const createdAt = new Date(Date.now() - 35 * 86400000).toISOString();
@@ -104,8 +173,8 @@ function seedDemo() {
 function periodSelect() { return `<label class="visually-hidden" for="period">Ranking period</label><select id="period" class="period-select" data-filter="period">${[['week', 'This week'], ['month', 'This month'], ['all', 'All time']].map(([v, l]) => `<option value="${v}" ${period === v ? 'selected' : ''}>${l}</option>`).join('')}</select>`; }
 function empty(title, description, action = '') { return `<div class="empty">${icon('leads')}<strong>${esc(title)}</strong>${esc(description)}${action}</div>`; }
 function shell(content) {
-  const pending = state.submissions.filter(s => s.status === 'pending').length;
-  const navItems = [['overview', 'overview'], ['goals', 'points'], ['leads', 'leads'], ['leaderboard', 'trophy'], ['review', 'shield'], ['team', 'team'], ...(state.user.role === 'admin' ? [['activity', 'activity']] : []), ['rules', 'key']];
+  const pending = state.pendingCount ?? state.submissions.filter(s => s.status === 'pending').length;
+  const navItems = [['overview', 'overview'], ['leads', 'leads'], ['review', 'shield'], ['leaderboard', 'trophy'], ['goals', 'points'], ['team', 'team'], ...(state.user.role === 'admin' ? [['activity', 'activity']] : []), ['rules', 'key']];
   return `<div class="layout"><aside class="sidebar">${brand()}<div class="workspace"><span class="workspace-badge">NX</span><div><strong>NEXWEB workspace</strong><small>${state.members.filter(m => m.active).length} members · Team workspace</small></div></div><p class="eyebrow nav-caption">Workspace</p><nav class="nav" aria-label="Main navigation">${navItems.map(([id, ic]) => `<button data-page="${id}" class="${page === id ? 'active' : ''}" ${page === id ? 'aria-current="page"' : ''}>${icon(ic)}<span>${labels[id]}</span>${id === 'review' && pending ? `<span class="count">${pending}</span>` : ''}</button>`).join('')}</nav><div class="sidebar-bottom"><div class="rules-mini"><strong>${icon('shield')}Good work. Fair points.</strong><p>Real posts. Verified outreach.<br>Every contribution counts.</p><button class="text-btn" data-page="rules">See the scoring rules ${icon('arrow')}</button></div><div class="profile">${avatar(state.user)}<div><strong>${esc(state.user.name)}</strong><small>${state.user.role === 'admin' ? 'Workspace admin' : 'Team member'}</small></div><button class="icon-btn" data-action="logout" aria-label="Sign out" title="Sign out">${icon('logout')}</button></div></div></aside><main class="main"><header class="topbar">${brand('mobile-brand')}<div class="breadcrumb">Workspace <span>/</span> <strong>${labels[page]}</strong></div><div class="topbar-right"><span class="live" id="sync-status">${demo ? 'Sample workspace' : 'Synced across your team'}</span><button class="icon-btn" data-action="password" aria-label="Change password" title="Change password">${icon('key')}</button><button class="icon-btn" data-page="team" aria-label="View your team">${avatar(state.user)}</button></div></header><div class="content">${demo ? '<div class="demo-banner"><span><strong>Preview workspace.</strong> Sample people and data. Changes reset when you refresh.</span><a href="/">Open your workspace ↗</a></div>' : ''}${content}<footer class="footer"><span>© ${new Date().getFullYear()} NEXWEB · Built for the next win.</span><span>${icon('shield')} Approved contributions only · Asia/Karachi</span></footer></div></main></div>`;
 }
 function heading(title, description, actions = '') { return `<div class="page-heading"><div><h1>${title}</h1><p>${description}</p></div><div class="heading-actions">${actions}</div></div>`; }
@@ -115,7 +184,20 @@ function leaderboardTable(full = false) {
   return `<div class="table-scroll"><table class="leaderboard-table"><caption class="visually-hidden">Team ranking by ${metric} for ${period === 'all' ? 'all time' : `this ${period}`}</caption><thead><tr><th scope="col">Rank</th><th scope="col">Member</th><th scope="col">Leads</th>${full ? '<th scope="col">Posts</th><th scope="col">DMs</th><th scope="col">Replies</th><th scope="col">Calls</th><th scope="col">Wins</th>' : ''}<th scope="col">Points</th></tr></thead><tbody>${ranks.map(m => `<tr class="${m.rank === 1 && (m.points || m.leads) ? 'rank-first' : ''}"><td><span class="rank r${m.rank}">${m.rank}</span></td><td><div class="member-cell">${avatar(m)}<div><strong>${esc(m.name)}${m.id === state.user.id ? '<span class="you-tag">you</span>' : ''}</strong><small>${m.role === 'admin' ? 'Admin' : 'Team member'}</small></div></div></td><td>${m.leads}</td>${full ? `<td>${m.posts}</td><td>${m.dms}</td><td>${m.replies}</td><td>${m.calls}</td><td>${m.wins}</td>` : ''}<td class="points">${m.points.toLocaleString()}</td></tr>`).join('')}</tbody></table></div>`;
 }
 function activityList() {
-  return `<div class="activity-list">${state.submissions.slice(0, 5).map(s => `<div class="activity-item"><span class="activity-icon ${s.kind}">${icon(kindIcon(s.kind))}</span><div class="activity-text"><strong>${esc(person(s.userId).name.split(' ')[0])}</strong> ${s.kind === 'lead' ? 'added a lead' : s.kind === 'instagram' ? 'submitted a post' : s.kind === 'dm' ? 'logged a DM' : s.kind === 'reply' ? 'got a client reply' : s.kind === 'call' ? 'booked a call' : 'won a client'}<p>${esc(s.title)}</p><time datetime="${s.createdAt}">${relative(s.createdAt)}</time></div><span class="activity-score ${s.status !== 'approved' ? 'pending' : ''}">${s.status === 'approved' ? s.kind === 'lead' ? 'Verified' : `+${state.scoring[s.kind]} pts` : s.status === 'pending' ? 'In review' : 'Rejected'}</span></div>`).join('') || '<p class="muted-text">Your team’s first contribution will appear here.</p>'}</div>`;
+  return `<div class="activity-list">${(state.recentSubmissions||state.submissions).slice(0, 5).map(s => `<div class="activity-item"><span class="activity-icon ${s.kind}">${icon(kindIcon(s.kind))}</span><div class="activity-text"><strong>${esc(person(s.userId).name.split(' ')[0])}</strong> ${s.kind === 'lead' ? 'added a lead' : s.kind === 'instagram' ? 'submitted a post' : s.kind === 'dm' ? 'logged a DM' : s.kind === 'reply' ? 'got a client reply' : s.kind === 'call' ? 'booked a call' : 'won a client'}<p>${esc(s.title)}</p><time datetime="${s.createdAt}">${relative(s.createdAt)}</time></div><span class="activity-score ${s.status !== 'approved' ? 'pending' : ''}">${s.status === 'approved' ? s.kind === 'lead' ? 'Verified' : `+${state.scoring[s.kind]} pts` : s.status === 'pending' ? 'In review' : 'Rejected'}</span></div>`).join('') || '<p class="muted-text">Your team’s first contribution will appear here.</p>'}</div>`;
+}
+function personalHome(){
+  const own=rankings(period,'points').find(m=>m.id===state.user.id)||{leads:0,dms:0,points:0,posts:0,rank:'—'};
+  const pending=state.myPendingCount??state.submissions.filter(s=>s.userId===state.user.id&&s.status==='pending').length;
+  const recent=state.personalRecent||state.submissions.filter(s=>s.userId===state.user.id).slice(0,5);
+  const stats=[['Approved leads',own.leads,'leads','Reviewed opportunities'],['Verified DMs',own.dms,'dm','1 point per approved DM'],['Your points',own.points,'points','Approved contributions only'],['In review',pending,'shield','Waiting for admin review']];
+  const first=esc(state.user.name.split(' ')[0]);
+  return heading('My work',`Welcome back, ${first}. A clear view of your work and what to do next.`,`${periodSelect()}<button class="btn primary" data-add="lead">${icon('plus')}Add lead</button>`)+
+    `<section class="work-welcome"><div><span class="eyebrow">ONE GOOD OPPORTUNITY AT A TIME</span><h2>Build your next client connection.</h2><p>Add a real hiring post, reach out with purpose, and let your approved work speak for itself.</p></div><div class="workspace-health">${icon('shield')}Admin-reviewed workspace</div></section>`+
+    `<div class="work-stats">${stats.map(([label,value,ic,note])=>`<section class="panel work-stat"><div class="work-stat-title"><span>${label}</span>${icon(ic)}</div><strong>${Number(value).toLocaleString()}</strong><small>${note}</small></section>`).join('')}</div>`+
+    `<div class="work-main-grid"><section class="panel next-steps"><div class="panel-heading"><div><h2>Your next steps</h2><p>Choose one action to move your work forward.</p></div></div><button class="next-step" data-add="lead"><span class="step-icon">${icon('plus')}</span><span><strong>Add a lead</strong><small>Found someone hiring? Save their post and requirement.</small></span>${icon('arrow')}</button><button class="next-step" data-add="dm"><span class="step-icon blue">${icon('dm')}</span><span><strong>Log your outreach</strong><small>Contacted an approved lead? Submit your DM evidence.</small></span>${icon('arrow')}</button><button class="next-step" data-add="instagram"><span class="step-icon pink">${icon('instagram')}</span><span><strong>Share an Instagram post</strong><small>Submit an original campaign post. Earn 10 points after review.</small></span>${icon('arrow')}</button>${state.user.role==='admin'&&state.pendingCount?`<button class="next-step admin-step" data-page="review"><span class="step-icon amber">${icon('shield')}</span><span><strong>Review ${state.pendingCount} pending contributions</strong><small>Your team is waiting for your review.</small></span>${icon('arrow')}</button>`:''}</section><section class="panel home-progress"><div class="panel-heading"><div><h2>A little progress, every day</h2><p>Your weekly targets</p></div>${icon('points')}</div>${progress('Points',weeklyData().personal.points,weeklyData().goals.points)}${progress('Approved leads',weeklyData().personal.leads,weeklyData().goals.leads)}<button class="btn full" data-page="goals">View goals & achievements ${icon('arrow')}</button></section></div>`+
+    `<div class="work-main-grid"><section class="panel personal-activity"><div class="panel-heading"><div><h2>Your recent activity</h2><p>See what has been approved and what needs attention.</p></div><button class="text-btn" data-page="review">View all ${icon('arrow')}</button></div>${recent.length?recent.map(s=>`<button class="personal-row" data-detail="${s.id}"><span class="activity-icon ${s.kind}">${icon(kindIcon(s.kind))}</span><span><strong>${esc(s.title)}</strong><small>${kindLabel[s.kind]} · ${relative(s.createdAt)}</small></span><span class="badge ${s.status}">${s.status==='pending'?'In review':s.status==='rejected'?'Needs changes':'Approved'}</span></button>`).join(''):empty('Start with your first lead.','Find a business asking for a website, then add the original post and what they need.')}</section><section class="panel home-leaderboard"><div class="panel-heading"><div><h2>Team leaderboard</h2><p>A little friendly competition. Approved work only.</p></div></div>${leaderboardTable()}<div class="panel-footer"><button class="text-btn" data-page="leaderboard">See the full leaderboard ${icon('arrow')}</button></div></section></div>`+
+    `<section class="panel getting-started"><div><span class="step-number">1</span><strong>Find a real opportunity</strong><p>Look for an original post asking for a website or redesign.</p></div><div><span class="step-number">2</span><strong>Add the source and details</strong><p>Save what they need so your team has useful context.</p></div><div><span class="step-number">3</span><strong>Get reviewed, then follow up</strong><p>Approved leads enter the lead ranking. Log your outreach separately.</p></div><button class="text-btn" data-page="rules">How points work ${icon('arrow')}</button></section>`;
 }
 function chart() {
   const days = Array.from({ length: 7 }, (_, i) => {
@@ -126,17 +208,10 @@ function chart() {
   const max = Math.max(1, ...days.map(d => d.count));
   return `<section class="panel chart-panel"><div class="panel-heading"><div><h2>A little progress, every day</h2><p>Approved contributions · Last 7 days</p></div>${icon('activity')}</div><div class="chart"><div class="chart-bars" role="img" aria-label="${days.map(d => `${d.label}: ${d.count} approved contributions`).join(', ')}">${days.map(d => `<div class="chart-day" title="${d.key}: ${d.count} approved"><div class="bar bar${Math.round(d.count / max * 10)}"></div></div>`).join('')}</div><div class="chart-labels" aria-hidden="true">${days.map(d => `<span>${d.label}</span>`).join('')}</div></div></section>`;
 }
-function overview() {
-  const rows = approved(), leads = rows.filter(s => s.kind === 'lead').length, posts = rows.filter(s => s.kind === 'instagram').length, dms = rows.filter(s => s.kind === 'dm').length;
-  const champion = rankings()[0];
-  const hasChampion = champion && (metric === 'points' ? champion.points : champion.leads) > 0;
-  const stats = [['Approved leads', leads, 'leads', 'Your shared opportunity pipeline'], ['Instagram posts', posts, 'instagram', '10 points per approved post'], ['Verified DMs', dms, 'dm', '1 point per verified DM'], ['Team points', rows.reduce((sum, s) => sum + (state.scoring[s.kind] || 0), 0), 'points', 'Activity + verified client outcomes']];
-  return heading('Team dashboard', 'Track your leads, posts, and the people moving your team forward.', `${periodSelect()}${addButton()}`) + `<div class="stats material-stats">${stats.map(([label, value, ic, note], i) => `<section class="stat material-stat color-${['orange', 'green', 'red', 'cyan'][i]}"><div class="stat-symbol">${icon(ic)}</div><div class="stat-head">${label}</div><div class="stat-value">${value.toLocaleString()}</div><div class="stat-foot">${icon(i === 3 ? 'trophy' : 'clock')}<span>${note}</span></div></section>`).join('')}</div><div class="material-charts">${materialChart('lead', 'Daily Leads', 'Original opportunities, approved by your admin.', 'green')}${materialChart('instagram', 'Instagram Posts', 'Every approved post earns your team 10 points.', 'orange')}${materialChart('dm', 'Verified Outreach', 'Real conversations. One point per verified DM.', 'red')}</div><div class="lower-grid material-lower"><section class="panel leaderboard-panel"><div class="panel-heading material-heading purple-heading"><div><h2>Team Leaderboard</h2><p>Ranked by ${metric === 'points' ? 'verified points' : 'approved leads'} · ${period === 'all' ? 'All time' : `This ${period}`}</p></div><button class="text-btn" data-page="leaderboard">View all ${icon('arrow')}</button></div>${leaderboardTable()}<div class="panel-footer">${icon('shield')}Only approved work counts. Every point has a paper trail.</div></section><section class="panel activity-panel"><div class="panel-heading material-heading orange-heading"><div><h2>Team Activity</h2><p>Your workspace’s latest contributions</p></div>${icon('activity')}</div>${activityList()}</section></div><section class="material-pacesetter panel"><span class="pacesetter-icon">${icon('trophy')}</span><div><strong>${hasChampion ? `${esc(champion.name)} is setting the pace` : 'Your team’s next pacesetter could be you'}</strong><p>${hasChampion ? `#${champion.rank} · ${champion.leads} leads · ${champion.replies} replies · ${champion.calls} calls · ${champion.wins} wins` : 'Submit your first lead or Instagram post to get started.'}</p></div><span class="pacesetter-points">${hasChampion ? metric === 'points' ? `${champion.points} pts` : `${champion.leads} leads` : 'Let’s go ↗'}</span></section>${goalPreview()}`;
-}
 function materialChart(kind, title, description, color) {
   const days = Array.from({ length: 7 }, (_, i) => {
     const d = new Date(Date.now() + 5 * 3600000 - (6 - i) * 86400000), key = d.toISOString().slice(0, 10);
-    const count = state.submissions.filter(s => s.kind === kind && s.status === 'approved' && new Date(new Date(s.approvedAt).getTime() + 5 * 3600000).toISOString().slice(0, 10) === key).length;
+    const count = state.compact ? (state.daily?.[kind]?.[i]||0) : state.submissions.filter(s => s.kind === kind && s.status === 'approved' && new Date(new Date(s.approvedAt).getTime() + 5 * 3600000).toISOString().slice(0, 10) === key).length;
     return { label: d.toLocaleDateString('en', { weekday: 'short', timeZone: 'UTC' }), count };
   });
   const max = Math.max(2, ...days.map(d => d.count)), total = days.reduce((sum, d) => sum + d.count, 0);
@@ -151,7 +226,7 @@ function progress(label, value, target, compact = false) {
 }
 function achievements(member) {
   const own = state.submissions.filter(s => s.userId === member.id && s.status === 'approved');
-  const count = kind => own.filter(s => s.kind === kind).length;
+  const count = kind => state.compact ? (state.lifetime?.[member.id]?.[kind]||0) : own.filter(s => s.kind === kind).length;
   return [
     { name: 'First lead', icon: 'leads', earned: count('lead') >= 1, detail: '1 approved lead' },
     { name: 'Lead scout', icon: 'search', earned: count('lead') >= 10, detail: '10 approved leads' },
@@ -171,7 +246,7 @@ function goalPreview() {
   return `<section class="panel weekly-preview"><div class="panel-heading"><div><h2>This week, one step further</h2><p>Your goals reset every Monday. Your achievements stay with you.</p></div><button class="text-btn" data-page="goals">Goals & wins ${icon('arrow')}</button></div><div class="weekly-preview-grid">${progress('Your points', w.personal.points, w.goals.points, true)}${progress('Your approved leads', w.personal.leads, w.goals.leads, true)}${progress('Shared team points', w.teamPoints, w.goals.teamPoints, true)}</div></section>`;
 }
 function goals() {
-  const w = weeklyData(), ownBadges = achievements(state.user), weeklyWins = state.submissions.filter(s => outcomeKinds.includes(s.kind) && s.status === 'approved' && s.approvedAt >= start('week')).sort((a, b) => b.approvedAt.localeCompare(a.approvedAt));
+  const w = weeklyData(), ownBadges = achievements(state.user), weeklyWins = state.compact ? state.weeklyWins||[] : state.submissions.filter(s => outcomeKinds.includes(s.kind) && s.status === 'approved' && s.approvedAt >= start('week')).sort((a, b) => b.approvedAt.localeCompare(a.approvedAt));
   const weekStart = start('week'), weekEnd = new Date(new Date(weekStart).getTime() + 7 * 86400000 - 1).toISOString();
   return heading('Turn good work into your next win.', `This week: ${date(weekStart)} – ${date(weekEnd)} · Goals reset Monday, Karachi time.`, `${state.user.role === 'admin' ? '<button class="btn" data-action="edit-goals">Edit goals</button>' : ''}<button class="btn primary" data-action="outcome">${icon('plus')}Log a win</button>`) +
     `<section class="panel shared-goal ${w.teamPoints >= w.goals.teamPoints ? 'goal-celebration' : ''}"><div class="shared-goal-icon">${icon('team')}</div><div class="shared-goal-copy"><span class="eyebrow">One team. One target.</span><h2>${w.teamPoints >= w.goals.teamPoints ? 'You did it, together!' : 'Every contribution moves us forward.'}</h2><p>${w.teamPoints >= w.goals.teamPoints ? 'Your team reached its weekly points target. Keep celebrating the quality work behind the number.' : 'Help your teammates find the next opportunity. Approved contributions from every active member count.'}</p>${progress('Shared weekly target', w.teamPoints, w.goals.teamPoints)}</div></section>` +
@@ -179,9 +254,10 @@ function goals() {
     `<section class="panel wins-panel"><div class="panel-heading"><div><h2>The wins worth celebrating</h2><p>Verified client progress from this week</p></div><button class="text-btn" data-action="outcome">Log an outcome ${icon('arrow')}</button></div>${weeklyWins.length ? `<div class="wins-feed">${weeklyWins.slice(0, 12).map(s => `<article class="win-item">${avatar(person(s.userId))}<div><strong>${esc(person(s.userId).name)}</strong><p>${esc(s.title)}</p><small>${dateTime(s.approvedAt)} · Approved by ${esc(person(s.reviewerId).name)}</small></div><span class="win-points">+${state.scoring[s.kind]} pts</span></article>`).join('')}</div>` : empty('The next client win is waiting.', 'Log a genuine reply, a confirmed call, or a won project. Your admin verifies the evidence.')}</section>` +
     `<section class="panel team-goals-panel"><div class="panel-heading"><div><h2>Everyone’s progress</h2><p>Weekly points target · Help each other reach the finish line</p></div>${icon('team')}</div><div class="team-goal-grid">${w.ranks.map(m => `<div class="team-goal-card"><div class="member-cell">${avatar(m)}<div><strong>${esc(m.name)}</strong><small>${m.replies} replies · ${m.calls} calls · ${m.wins} clients won</small></div></div>${progress('Weekly points', m.points, w.goals.points, true)}<div class="mini-achievements">${achievements(m).filter(b => b.earned).map(b => `<span class="badge" title="${esc(b.detail)}">${b.name}</span>`).join('') || '<span class="muted-text">Their first badge is ahead.</span>'}</div></div>`).join('')}</div></section><div class="callout spaced">Reply <strong>+5</strong> · Booked call <strong>+20</strong> · Client won <strong>+50</strong>. Each milestone counts once per approved lead and needs evidence and your admin’s approval. Editing a pipeline stage alone never awards points.</div>`;
 }
-function logOutcome() {
-  const leads = state.submissions.filter(s => s.kind === 'lead' && s.status === 'approved' && s.userId === state.user.id);
-  openModal('A real step toward a new client.', 'Celebrate a genuine outcome. Your admin checks the evidence before points count.', leads.length ? `<form data-form="submission" data-kind="outcome">${select('outcomeKind', 'What happened?', [['reply', 'Client replied · 5 points'], ['call', 'Call booked · 20 points'], ['win', 'Client won · 50 points']])}${select('leadId', 'Which approved lead?', leads.map(l => [l.id, l.title]))}${field('url', 'Private evidence link', 'url', '', 'required maxlength="1500" placeholder="https://… (accessible to the workspace owner)"')}${field('proof', 'Outcome details & evidence', 'textarea', '', 'minlength="15" placeholder="Reply: include their response. Call: confirmed date and booking. Win: accepted scope or agreement. Redact private details."')}<div class="callout">Each outcome counts once per lead. Automated replies, unconfirmed calls, and unaccepted proposals should not be claimed. Evidence is private to you and the workspace owner.</div>${buttons('Submit outcome for review')}</form>` : '<div class="callout">Add a lead you own and get it approved first. Then you can log its client outcomes.</div><div class="modal-buttons"><button class="btn primary" data-add="lead">Add a lead</button></div>');
+async function logOutcome() {
+  if(compactMode)await loadEligible('reply');
+  const leads = compactMode?eligibleItems:state.submissions.filter(s => s.kind === 'lead' && s.status === 'approved' && s.userId === state.user.id);
+  openModal('A real step toward a new client.', 'Celebrate a genuine outcome. Your admin checks the evidence before points count.', (leads.length||compactMode) ? `<form data-form="submission" data-kind="outcome">${select('outcomeKind', 'What happened?', [['reply', 'Client replied · 5 points'], ['call', 'Call booked · 20 points'], ['win', 'Client won · 50 points']])}${eligiblePicker('Which approved lead?',leads)}${field('url', 'Private evidence link', 'url', '', 'required maxlength="1500" placeholder="https://… (accessible to the workspace owner)"')}${field('proof', 'Outcome details & evidence', 'textarea', '', 'minlength="15" placeholder="Reply: include their response. Call: confirmed date and booking. Win: accepted scope or agreement. Redact private details."')}<div class="callout">Each outcome counts once per lead. Automated replies, unconfirmed calls, and unaccepted proposals should not be claimed. Evidence is private to you and the workspace owner.</div>${buttons('Submit outcome for review')}</form>` : '<div class="callout">Add a lead you own and get it approved first. Then you can log its client outcomes.</div><div class="modal-buttons"><button class="btn primary" data-add="lead">Add a lead</button></div>');
 }
 function editGoals() {
   const values = state.goals || defaultGoals;
@@ -191,19 +267,22 @@ function leaderboard() {
   return heading('A little friendly competition.', 'Celebrate the work that moves your team forward.', periodSelect()) + `<section class="panel"><div class="toolbar"><div class="tabs" role="group" aria-label="Rank by"><button data-metric="points" class="${metric === 'points' ? 'active' : ''}">By points</button><button data-metric="leads" class="${metric === 'leads' ? 'active' : ''}">By leads</button></div><span class="filters-note">${state.members.filter(m => m.active).length} active members · Approved work only</span></div>${leaderboardTable(true)}<div class="panel-footer">${icon('shield')}Ties share a rank. ${metric === 'points' ? 'Lead count' : 'Points'} breaks the first tie; identical totals share their position.</div></section><div class="callout spaced">Instagram post = <strong>10 points</strong> · Verified DM = <strong>1 point</strong> · Client reply = <strong>5 points</strong> · Booked call = <strong>20 points</strong> · Client won = <strong>50 points</strong> · Leads are tracked separately. Switch to “By leads” to reward lead sourcing. Weeks start Monday, in Karachi time.</div>`;
 }
 function filteredLeads() {
+  if(compactMode)return recordPage.view==='leads'?recordPage.items:[];
   return state.submissions.filter(s => s.kind === 'lead' && (filter === 'all' || s.status === filter || s.stage === filter) && (country === 'all' || s.country === country) && (!mine || s.userId === state.user.id) && `${s.title} ${s.notes} ${s.service} ${person(s.userId).name}`.toLowerCase().includes(query.toLowerCase()));
 }
 function leadRows() {
+  if(compactMode&&recordPage.error)return `<div class="callout">${esc(recordPage.error)} <button class="text-btn" data-records="retry">Try again</button></div>`;
   const rows = filteredLeads();
   return rows.length ? `<div class="table-scroll"><table><caption class="visually-hidden">Team lead pipeline</caption><thead><tr><th scope="col">Prospect / opportunity</th><th scope="col">Owner</th><th scope="col">Country</th><th scope="col">Review</th><th scope="col">Pipeline</th><th scope="col">Follow-up</th><th scope="col">Details</th></tr></thead><tbody>${rows.map(s => `<tr><td><a class="lead-title" href="#" data-detail="${s.id}">${esc(s.title)}<small>${esc(s.service)}</small></a></td><td><div class="member-cell">${avatar(person(s.userId))}<strong>${esc(person(s.userId).name.split(' ')[0])}</strong></div></td><td class="nowrap">${esc(s.country)}</td><td><span class="badge ${s.status}">${s.status}</span></td><td><span class="badge ${s.stage}">${s.stage.replaceAll('_', ' ')}</span></td><td class="nowrap">${s.followUp ? `<span class="${s.followUp <= today() && !['won', 'lost'].includes(s.stage) ? 'offline' : ''}">${date(`${s.followUp}T00:00:00+05:00`)}</span>` : '—'}</td><td><div class="row-actions"><button class="btn small" data-detail="${s.id}">View</button><a href="${esc(s.url)}" target="_blank" rel="noopener noreferrer" aria-label="Open source for ${esc(s.title)}">${icon('external')}</a></div></td></tr>`).join('')}</tbody></table></div>` : empty('Your next opportunity goes here.', 'Add a lead with its source link and what they need.', `<br><button class="btn primary" data-add="lead">${icon('plus')}Add a lead</button>`);
 }
 function leads() {
-  return heading('Your next win starts here.', 'One shared pipeline. Every opportunity accounted for.', `<button class="btn" data-action="export">${icon('download')}<span class="optional">Export</span></button><button class="btn primary" data-add="lead">${icon('plus')}Add lead</button>`) + `<section class="panel"><div class="toolbar"><label class="search"><span class="visually-hidden">Search leads</span>${icon('search')}<input type="search" placeholder="Search prospects, services, or teammates…" id="lead-search" value="${esc(query)}"></label><label><span class="visually-hidden">Filter by review or stage</span><select data-filter="status">${[['all', 'All statuses'], ['pending', 'In review'], ['approved', 'Approved'], ['rejected', 'Rejected'], ['new', 'New'], ['contacted', 'Contacted'], ['replied', 'Replied'], ['call_booked', 'Call booked'], ['won', 'Won'], ['lost', 'Lost']].map(([v, l]) => `<option value="${v}" ${filter === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label><label><span class="visually-hidden">Filter by country</span><select data-filter="country">${[['all', 'All countries'], ['USA', 'USA'], ['Pakistan', 'Pakistan'], ['Other', 'Other']].map(([v, l]) => `<option value="${v}" ${country === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label><button class="btn small" data-action="mine" aria-pressed="${mine}">${mine ? 'My leads ✓' : 'My leads'}</button></div><div id="lead-results">${leadRows()}</div><div class="panel-footer">${icon('shield')}Duplicate source links are blocked across the team. Only approved leads count toward lead rankings.</div></section>`;
+  return heading('Your next win starts here.', 'One shared pipeline. Every opportunity accounted for.', `<button class="btn" data-action="export">${icon('download')}<span class="optional">Export</span></button><button class="btn primary" data-add="lead">${icon('plus')}Add lead</button>`) + `<section class="panel"><div class="toolbar"><label class="search"><span class="visually-hidden">Search leads</span>${icon('search')}<input type="search" placeholder="Search prospects, services, or teammates…" id="lead-search" value="${esc(query)}"></label><label><span class="visually-hidden">Filter by review or stage</span><select data-filter="status">${[['all', 'All statuses'], ['pending', 'In review'], ['approved', 'Approved'], ['rejected', 'Rejected'], ['new', 'New'], ['contacted', 'Contacted'], ['replied', 'Replied'], ['call_booked', 'Call booked'], ['won', 'Won'], ['lost', 'Lost']].map(([v, l]) => `<option value="${v}" ${filter === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label><label><span class="visually-hidden">Filter by country</span><select data-filter="country">${[['all', 'All countries'], ['USA', 'USA'], ['Pakistan', 'Pakistan'], ['Other', 'Other']].map(([v, l]) => `<option value="${v}" ${country === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label><button class="btn small" data-action="mine" aria-pressed="${mine}">${mine ? 'My leads ✓' : 'My leads'}</button></div><div id="lead-results">${leadRows()}${pager()}</div><div class="panel-footer">${icon('shield')}Duplicate source links are blocked across the team. Only approved leads count toward lead rankings.</div></section>`;
 }
 function review() {
   const admin = state.user.role === 'admin';
-  const rows = state.submissions.filter(s => (filter === 'all' ? s.status === 'pending' : s.status === filter) && (admin || s.userId === state.user.id));
-  return heading(admin ? 'Great work deserves a fair review.' : 'Your contributions, in review.', 'Only the workspace owner approves work. Owner reviews of their own contributions are recorded.', `<button class="btn primary" data-action="add">${icon('plus')}Add activity</button>`) + `<div class="toolbar panel no-margin"><div class="tabs" role="group" aria-label="Review status">${[['all', 'Pending'], ['approved', 'Approved'], ['rejected', 'Rejected']].map(([v, l]) => `<button data-review-filter="${v}" class="${filter === v ? 'active' : ''}">${l}</button>`).join('')}</div><span class="filters-note">${rows.length} ${rows.length === 1 ? 'submission' : 'submissions'}</span></div><div class="review-grid spaced">${rows.map(s => `<article class="panel review-card"><div class="review-top"><span class="badge ${s.status}">${icon(kindIcon(s.kind))}${kindLabel[s.kind]}</span><span class="review-meta">${s.kind === 'lead' ? 'Lead ranking' : `${state.scoring[s.kind]} ${s.status === 'approved' ? 'points' : 'pts on approval'}`}</span></div><h3>${esc(s.title)}</h3><div class="member-cell">${avatar(person(s.userId))}<div><strong>${esc(person(s.userId).name)}</strong><small>${dateTime(s.createdAt)}</small></div></div><div class="proof-box"><small>${s.kind === 'lead' ? 'Requirement' : 'Evidence & context'}</small>${esc(s.kind === 'lead' ? s.notes : s.proof)}</div>${s.reviewNote ? `<p>Review note: ${esc(s.reviewNote)}</p>` : ''}${s.url ? `<a class="detail-link" href="${esc(s.url)}" target="_blank" rel="noopener noreferrer">${icon('external')} ${s.kind === 'dm' || outcomeKinds.includes(s.kind) ? 'Open private evidence' : 'Open original post'}</a>` : ''}${s.leadId ? `<button class="text-btn" data-detail="${s.leadId}">View linked lead ${icon('arrow')}</button>` : ''}<div class="review-actions">${admin ? s.status === 'pending' ? `<button class="btn primary small" data-approve="${s.id}">${icon('check')}Approve</button><button class="btn danger small" data-reject="${s.id}">Reject</button>` : s.status === 'approved' ? `<button class="btn danger small" data-revoke="${s.id}">Revoke approval</button>` : '' : s.status === 'pending' ? '<span class="muted-text">Awaiting the workspace owner’s review.</span>' : ''}${s.status === 'rejected' && s.userId === state.user.id ? `<button class="btn small" data-resubmit="${s.id}">Update evidence & resubmit</button>` : ''}</div></article>`).join('') || `<div class="panel">${empty('All clear for now.', filter === 'all' ? 'New submissions will appear here for review.' : 'There are no matching submissions.')}</div>`}</div>`;
+  const rows = compactMode ? recordPage.view==='review'?recordPage.items:[] : state.submissions.filter(s => (filter === 'all' ? s.status === 'pending' : s.status === filter) && (admin || s.userId === state.user.id));
+  if(compactMode&&recordPage.error)return heading('Your reviews','We could not load this list.')+`<div class="callout">${esc(recordPage.error)} <button class="text-btn" data-records="retry">Try again</button></div>`;
+  return heading(admin ? 'Review contributions' : 'My activity', 'Only the workspace owner approves work. Owner reviews of their own contributions are recorded.', `<button class="btn primary" data-action="add">${icon('plus')}Add activity</button>`) + `<div class="toolbar panel no-margin"><div class="tabs" role="group" aria-label="Review status">${[['all', 'Pending'], ['approved', 'Approved'], ['rejected', 'Rejected']].map(([v, l]) => `<button data-review-filter="${v}" class="${filter === v ? 'active' : ''}">${l}</button>`).join('')}</div><span class="filters-note">${rows.length} ${rows.length === 1 ? 'submission' : 'submissions'}</span></div><div class="review-grid spaced">${rows.map(s => `<article class="panel review-card"><div class="review-top"><span class="badge ${s.status}">${icon(kindIcon(s.kind))}${kindLabel[s.kind]}</span><span class="review-meta">${s.kind === 'lead' ? 'Lead ranking' : `${state.scoring[s.kind]} ${s.status === 'approved' ? 'points' : 'pts on approval'}`}</span></div><h3>${esc(s.title)}</h3><div class="member-cell">${avatar(person(s.userId))}<div><strong>${esc(person(s.userId).name)}</strong><small>${dateTime(s.createdAt)}</small></div></div><div class="proof-box"><small>${s.kind === 'lead' ? 'Requirement' : 'Evidence & context'}</small>${esc(s.kind === 'lead' ? s.notes : s.proof)}</div>${s.reviewNote ? `<p>Review note: ${esc(s.reviewNote)}</p>` : ''}${s.url ? `<a class="detail-link" href="${esc(s.url)}" target="_blank" rel="noopener noreferrer">${icon('external')} ${s.kind === 'dm' || outcomeKinds.includes(s.kind) ? 'Open private evidence' : 'Open original post'}</a>` : ''}${s.leadId ? `<button class="text-btn" data-detail="${s.leadId}">View linked lead ${icon('arrow')}</button>` : ''}<div class="review-actions">${admin ? s.status === 'pending' ? `<button class="btn primary small" data-approve="${s.id}">${icon('check')}Approve</button><button class="btn danger small" data-reject="${s.id}">Reject</button>` : s.status === 'approved' ? `<button class="btn danger small" data-revoke="${s.id}">Revoke approval</button>` : '' : s.status === 'pending' ? '<span class="muted-text">Awaiting the workspace owner’s review.</span>' : ''}${s.status === 'rejected' && s.userId === state.user.id ? `<button class="btn small" data-resubmit="${s.id}">Update evidence & resubmit</button>` : ''}</div></article>`).join('') || `<div class="panel">${empty('All clear for now.', filter === 'all' ? 'New submissions will appear here for review.' : 'There are no matching submissions.')}</div>`}</div>`+pager();
 }
 function team() {
   const ranks = rankings();
@@ -218,9 +297,12 @@ function rules() {
 }
 function render() {
   if (!state) return renderAuth();
-  const views = { overview, goals, leads, leaderboard, review, team, activity, rules };
-  app.innerHTML = shell((views[page] || overview)());
+  labels.review=state.user.role==='admin'?'Reviews':'My activity';
+  const views = { overview:personalHome, goals, leads, leaderboard, review, team, activity, rules };
+  const upgrade=!demo&&setupLocation==='cloudflare'&&!compactMode&&state.user.role==='admin'?'<div class="upgrade-note"><strong>Finish your workspace upgrade</strong><span>A one-time database update enables faster loading for your team.</span><a href="https://github.com/NEXWEB-dot/leaddashboard/blob/main/CAPACITY-AND-UPGRADE.md" target="_blank" rel="noopener noreferrer">Open setup guide ↗</a></div>':'';
+  app.innerHTML = shell(upgrade+(views[page] || personalHome)());
   document.title = `${labels[page]} · Leadroom`;
+  syncLabel();
 }
 function field(name, label, type = 'text', value = '', options = '') {
   const control = type === 'textarea' ? `<textarea name="${name}" required maxlength="2000" ${options}>${esc(value)}</textarea>` : `<input type="${type}" name="${name}" value="${esc(value)}" ${options}>`;
@@ -232,18 +314,20 @@ function openModal(title, description, contents) {
   if (!modal.open) modal.showModal();
 }
 const buttons = (submit = 'Submit for review') => `<div class="form-error" role="alert"></div><div class="modal-buttons"><button class="btn" type="button" data-action="close">Cancel</button><button class="btn primary" type="submit">${submit}${icon('arrow')}</button></div>`;
-function add(kind = 'lead') {
+async function add(kind = 'lead') {
+  if(compactMode&&kind==='dm')await loadEligible('dm');
   let contents;
   if (kind === 'lead') contents = field('title', 'Prospect / company and opportunity', 'text', '', 'required minlength="3" maxlength="160" placeholder="e.g. Studio North · Website redesign"') + field('url', 'Original source post link', 'url', '', 'required maxlength="1500" placeholder="https://www.linkedin.com/posts/…"') + `<div class="form-row">${select('country', 'Country', [['Pakistan', 'Pakistan'], ['USA', 'USA'], ['Other', 'Other']])}${select('service', 'What do they need?', ['Web development', 'Website redesign', 'Landing page', 'Other'].map(s => [s, s]))}</div>` + field('notes', 'Requirement & useful context', 'textarea', '', 'minlength="15" placeholder="What are they asking for? Mention budget, timing, and the best way to contact them if known."') + '<p class="form-note">Add the original hiring post. Don’t submit a search page or an unrelated profile. Approved leads count toward the lead leaderboard.</p>';
   else if (kind === 'instagram') contents = field('title', 'Post title / campaign', 'text', '', 'required minlength="3" maxlength="160" placeholder="e.g. Our latest website transformation"') + field('url', 'Instagram post or reel permalink', 'url', '', 'required maxlength="1500" placeholder="https://www.instagram.com/p/…"') + field('proof', 'Ownership & campaign context', 'textarea', '', 'minlength="15" placeholder="Which account did you post from? Explain how this post promotes the team’s work."') + '<div class="callout"><strong>10 points</strong> after review. A post or reel can be credited only once across the team.</div>';
   else {
-    const leads = state.submissions.filter(s => s.kind === 'lead' && s.status === 'approved' && s.userId === state.user.id && !state.submissions.some(d => d.kind === 'dm' && d.leadId === s.id));
-    contents = leads.length ? select('leadId', 'Which lead did you contact?', leads.map(l => [l.id, l.title])) + field('url', 'Private evidence link', 'url', '', 'required maxlength="1500" placeholder="https://… (reviewer-accessible screenshot or record)"') + field('proof', 'DM context', 'textarea', '', 'minlength="15" placeholder="When and where did you send it? Include the recipient and a short summary. Redact personal information."') + '<div class="callout"><strong>1 point</strong> after review. One DM reward per lead. Evidence is visible only to you and the owner. Share it privately with the reviewer.</div>' : '<div class="callout">You need an approved lead you own, with no existing DM claim. Add a lead first, or update and resubmit a rejected DM in the review queue.</div>';
+    const leads = compactMode?eligibleItems:state.submissions.filter(s => s.kind === 'lead' && s.status === 'approved' && s.userId === state.user.id && !state.submissions.some(d => d.kind === 'dm' && d.leadId === s.id));
+    contents = leads.length ? eligiblePicker('Which lead did you contact?',leads) + field('url', 'Private evidence link', 'url', '', 'required maxlength="1500" placeholder="https://… (reviewer-accessible screenshot or record)"') + field('proof', 'DM context', 'textarea', '', 'minlength="15" placeholder="When and where did you send it? Include the recipient and a short summary. Redact personal information."') + '<div class="callout"><strong>1 point</strong> after review. One DM reward per lead. Evidence is visible only to you and the owner. Share it privately with the reviewer.</div>' : '<div class="callout">You need an approved lead you own, with no existing DM claim. Add a lead first, or update and resubmit a rejected DM in the review queue.</div>';
   }
-  const noDM = kind === 'dm' && !state.submissions.some(s => s.kind === 'lead' && s.status === 'approved' && s.userId === state.user.id && !state.submissions.some(d => d.kind === 'dm' && d.leadId === s.id));
-  openModal('Make your next move.', 'A small action today. A stronger pipeline tomorrow.', `<button class="btn outcome-shortcut" data-action="outcome">${icon('trophy')}Log a reply, call, or client win</button><div class="tabs" role="group" aria-label="Activity type">${[['lead', 'Add lead'], ['instagram', 'Instagram post'], ['dm', 'Log a DM']].map(([v, l]) => `<button data-add="${v}" class="${kind === v ? 'active' : ''}">${l}</button>`).join('')}</div><form data-form="submission" data-kind="${kind}">${contents}${noDM ? '' : buttons()}</form>`);
+  const noDM = kind === 'dm' && (compactMode?!eligibleItems.length:!state.submissions.some(s => s.kind === 'lead' && s.status === 'approved' && s.userId === state.user.id && !state.submissions.some(d => d.kind === 'dm' && d.leadId === s.id)));
+  openModal(kind === 'lead' ? 'Add a lead' : kind === 'dm' ? 'Log your outreach' : 'Submit an Instagram post', kind === 'lead' ? 'Save the original post and what the business needs. Your admin will review it.' : 'Add the source and evidence. Points count after admin approval.', `<form data-form="submission" data-kind="${kind}">${contents}${noDM ? '' : buttons()}</form>`);
 }
-function detail(id) {
+async function detail(id) {
+  if(compactMode){const result=await api(`records/${encodeURIComponent(id)}`);const records=new Map([...state.submissions,result.item,...result.linked].map(r=>[r.id,r]));state.submissions=[...records.values()];}
   const s = state.submissions.find(s => s.id === id);
   if (!s) return showToast('This item is no longer available.');
   const canEdit = s.userId === state.user.id || state.user.role === 'admin';
@@ -257,13 +341,31 @@ function invite() { openModal('Add a little more team.', 'An email-bound invitat
 function resubmit(id) { const s = state.submissions.find(s => s.id === id); openModal('Make it review-ready.', 'The original source link stays reserved. Add better evidence for another review.', `<form data-form="resubmit" data-id="${id}">${field('evidence', s.kind === 'lead' ? 'Updated requirement & context' : 'Updated evidence & context', 'textarea', s.kind === 'lead' ? s.notes : s.proof, 'minlength="15"')}${buttons('Resubmit for review')}</form>`); }
 function manageMember(id) { const m = person(id); openModal('Manage workspace access.', esc(m.name), `<form data-form="member" data-id="${id}">${select('active', 'Account access', [['true', 'Active'], ['false', 'Disabled']], String(m.active))}<div class="callout">Disabling an account signs it out and hides it from current rankings. Its contributions and audit history are preserved.</div>${buttons('Save access')}</form>`); }
 function password() { if (demo) return showToast('Account changes are available in your live workspace.'); openModal('Keep your account yours.', 'Changing your password signs you out on every device.', `<form data-form="password">${field('currentPassword', 'Current password', 'password', '', 'required autocomplete="current-password"')}${field('password', 'New password', 'password', '', 'required minlength="12" maxlength="200" autocomplete="new-password"')}<p class="form-note">Use a unique passphrase of at least 12 characters.</p>${buttons('Change password')}</form>`); }
-function exportCSV() {
-  const rows = filteredLeads();
+async function exportCSV() {
+  if(exporting){showToast('An export is already in progress.');return;}
+  exporting=true;
+  try {
+  const rows = compactMode?[]:filteredLeads();
+  if(compactMode){const params=listParams('leads');params.set('limit','250');let cursor='';do{params.set('cursor',cursor);const result=await exportPage(`records?${params}`);rows.push(...result.items);cursor=result.nextCursor;}while(cursor);}
   const cell = value => { let s = String(value ?? ''); if (/^[\s]*[=+\-@\t\r]/.test(s)) s = `'${s}`; return `"${s.replaceAll('"', '""')}"`; };
   const columns = ['Prospect', 'Owner', 'Country', 'Service', 'Review', 'Stage', 'Follow-up', 'Source', 'Notes'];
   const data = [columns, ...rows.map(s => [s.title, person(s.userId).name, s.country, s.service, s.status, s.stage, s.followUp, s.url, s.notes])].map(row => row.map(cell).join(',')).join('\r\n');
   const url = URL.createObjectURL(new Blob(['\uFEFF' + data], { type: 'text/csv;charset=utf-8' }));
   const a = document.createElement('a'); a.href = url; a.download = `leadroom-${today()}.csv`; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); showToast(`Exported ${rows.length} leads with current filters.`);
+  } finally {exporting=false;}
+}
+async function exportPage(path){
+  let attempts=0;
+  for(;;){
+    try{return await api(path);}catch(error){
+      const throttled=error.status===429,transient=!error.status||error.status>=500;
+      if(!throttled&&(!transient||attempts>=3))throw error;
+      attempts++;const seconds=throttled?Math.max(60,error.retryAfter||60):Math.min(15,2**attempts);
+      showToast(`Export paused. Resuming in ${seconds} seconds; completed pages are saved.`);
+      await new Promise(resolve=>setTimeout(resolve,seconds*1000));
+      if(!state)throw Error('Sign in again to continue your export.');
+    }
+  }
 }
 function renderAuth() {
   // Pages may redirect /join to /; browsers retain the private invitation fragment.
@@ -304,7 +406,7 @@ async function onSubmit(event) {
   try {
     if (['login', 'setup', 'join'].includes(type)) {
       if (type === 'join') data.token = location.hash.slice(1);
-      const result = await api(type, data); csrf = result.csrf; needsSetup = false; history.replaceState(null, '', '/'); await refresh(); startPolling(); return;
+      const result = await api(type, data); csrf = result.csrf; needsSetup = false; history.replaceState(null, '', '/'); lastEtag='';const session=await api('session');compactMode=Boolean(session.compact);await refresh(); startPolling(); return;
     }
     if (type === 'invite') {
       if (demo) { openModal('Invites are ready in your workspace.', 'The preview uses sample people. No invitation was created.', '<div class="callout">Open your workspace, create an admin account, then invite your teammates. Your real invite links will be bound to their email addresses.</div><div class="modal-buttons"><button class="btn primary" data-action="close">Got it</button></div>'); return; }
@@ -334,12 +436,16 @@ async function onSubmit(event) {
 }
 document.addEventListener('submit', onSubmit);
 document.addEventListener('click', async event => {
+  lastActivity=Date.now();
   const el = event.target.closest('button,a'); if (!el) return;
-  if (el.dataset.page) { event.preventDefault(); page = el.dataset.page; filter = 'all'; query = ''; render(); window.scrollTo({ top: 0, behavior: 'instant' }); }
-  else if (el.dataset.add) { event.preventDefault(); add(el.dataset.add); }
-  else if (el.dataset.detail) { event.preventDefault(); detail(el.dataset.detail); }
+  try {
+  if(el.dataset.eligible){await refreshEligibleOptions(el.dataset.eligible);return;}
+  if(el.dataset.records){await loadRecords(el.dataset.records==='retry',true,el.dataset.records);return;}
+  if (el.dataset.page) { event.preventDefault(); page = el.dataset.page; ++listSequence; filter = 'all'; query = ''; recordPage={view:'',items:[],nextCursor:'',cursors:[''],index:0,loading:false,error:''}; render(); if(compactMode)await loadRecords(true);window.scrollTo({ top: 0, behavior: 'instant' }); }
+  else if (el.dataset.add) { event.preventDefault(); await add(el.dataset.add); }
+  else if (el.dataset.detail) { event.preventDefault(); await detail(el.dataset.detail); }
   else if (el.dataset.metric) { metric = el.dataset.metric; render(); }
-  else if (el.dataset.reviewFilter) { filter = el.dataset.reviewFilter; render(); }
+  else if (el.dataset.reviewFilter) { filter = el.dataset.reviewFilter; if(compactMode)await loadRecords(true);else render(); }
   else if (el.dataset.approve) await approve(el.dataset.approve);
   else if (el.dataset.reject) reject(el.dataset.reject);
   else if (el.dataset.revoke) reject(el.dataset.revoke, true);
@@ -348,37 +454,58 @@ document.addEventListener('click', async event => {
   else if (el.dataset.action) {
     const action = el.dataset.action;
     if (action === 'close') modal.close();
-    else if (action === 'add') add();
-    else if (action === 'outcome') logOutcome();
+    else if (action === 'add') openModal('What did you work on?', 'Choose an activity to submit for admin review.', `<div class="activity-picker"><button class="btn" data-add="lead">${icon('leads')}Add a lead</button><button class="btn" data-add="dm">${icon('dm')}Log a DM</button><button class="btn" data-add="instagram">${icon('instagram')}Submit an Instagram post</button></div>`);
+    else if (action === 'outcome') await logOutcome();
     else if (action === 'edit-goals' && state.user.role === 'admin') editGoals();
     else if (action === 'invite') invite();
     else if (action === 'password') password();
-    else if (action === 'mine') { mine = !mine; render(); }
-    else if (action === 'export') exportCSV();
-    else if (action === 'logout') { if (demo) { location.href = '/'; return; } try { await api('logout', {}); state = null; clearInterval(refreshTimer); renderAuth(); } catch (e) { showToast(e.message); } }
+    else if (action === 'mine') { mine = !mine; if(compactMode)await loadRecords(true,false);render(); }
+    else if (action === 'export') {showToast('Preparing all matching leads…');await exportCSV();}
+    else if (action === 'logout') { if (demo) { location.href = '/'; return; } try { await api('logout', {}); state = null; lastEtag='';clearInterval(refreshTimer); renderAuth(); } catch (e) { showToast(e.message); } }
     else if (action === 'copy-invite') { const input = $('.invite-url', modal); try { await navigator.clipboard.writeText(input.value); showToast('Private invitation link copied.'); } catch { input.select(); showToast('Select and copy the invitation link.'); } }
   }
+  } catch(error){showToast(error.message||'We could not complete that action. Please try again.');}
 });
-document.addEventListener('change', event => {
+document.addEventListener('change', async event => {
+  lastActivity=Date.now();
   const field = event.target.dataset.filter;
   if (field === 'period') { period = event.target.value; render(); }
-  else if (field === 'status') { filter = event.target.value; $('#lead-results').innerHTML = leadRows(); }
-  else if (field === 'country') { country = event.target.value; $('#lead-results').innerHTML = leadRows(); }
+  else if (field === 'status') { filter = event.target.value; if(compactMode)await loadRecords(true);else $('#lead-results').innerHTML = leadRows(); }
+  else if (field === 'country') { country = event.target.value; if(compactMode)await loadRecords(true);else $('#lead-results').innerHTML = leadRows(); }
+  else if(compactMode&&event.target.name==='outcomeKind'){await refreshEligibleOptions();}
+  else if(compactMode&&event.target.name==='leadId')updateEligibleSource();
 });
-document.addEventListener('input', event => { if (event.target.id === 'lead-search') { query = event.target.value; $('#lead-results').innerHTML = leadRows(); } });
+document.addEventListener('input', event => {
+  lastActivity=Date.now();
+  if (event.target.id === 'lead-search') {
+    query = event.target.value;
+    if(compactMode){++listSequence;clearTimeout(searchTimer);searchTimer=setTimeout(()=>loadRecords(true),350);}else $('#lead-results').innerHTML = leadRows();
+  }else if(compactMode&&event.target.id==='eligible-search'){++eligibleSequence;clearTimeout(eligibleTimer);eligibleTimer=setTimeout(refreshEligibleOptions,350);}
+});
+function updateEligibleSource(){const selected=$('select[name="leadId"]',modal),source=$('#eligible-source',modal),row=eligibleItems.find(l=>l.id===selected?.value)||eligibleItems[0];if(source){source.href=row?.url||'';source.hidden=!row;}}
+async function refreshEligibleOptions(direction=''){
+  const input=$('#eligible-search'), kind=$('select[name="outcomeKind"]',modal)?.value||'dm';
+  try{if(await loadEligible(kind,input?.value||'',direction)){const select=$('select[name="leadId"]',modal);if(!select||!modal.open)return;const previous=select.value;select.innerHTML=eligibleItems.length?eligibleItems.map(l=>`<option value="${esc(l.id)}" ${l.id===previous?'selected':''}>${esc(leadChoice(l)[1])}</option>`).join(''):'<option value="">No matching eligible leads</option>';$('#eligible-pages',modal).outerHTML=eligibleControls();updateEligibleSource();}}
+  catch(error){showToast(error.message);}
+}
 modal.addEventListener('click', e => { if (e.target === modal) { const r = modal.getBoundingClientRect(); if (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom) modal.close(); } });
 function startPolling() {
   clearInterval(refreshTimer);
   if (demo) return;
-  refreshTimer = setInterval(async () => {
-    if (!state || document.hidden || modal.open || document.activeElement?.matches('input,select,textarea')) return;
-    try { await refresh(); } catch { const status = $('#sync-status'); if (status) { status.textContent = 'Connection interrupted'; status.classList.add('offline'); } }
-  }, 20000);
+  refreshTimer = setInterval(poll,60000+Math.floor(Math.random()*5000));
 }
+async function poll(){
+  if(!state||document.hidden||modal.open||refreshing||document.activeElement?.matches('input,select,textarea')||Date.now()<retryAt)return;
+  if(Date.now()-lastActivity>300000){syncLabel('Updates paused while idle');return;}
+  try{await refresh(false,true);}catch(error){failures++;retryAt=Date.now()+Math.max(error.retryAfter||0,Math.min(300,60*2**Math.min(failures,3)))*1000;syncLabel('Connection interrupted · retrying shortly');}
+}
+document.addEventListener('pointerdown',()=>{lastActivity=Date.now();});
+document.addEventListener('keydown',()=>{lastActivity=Date.now();});
+document.addEventListener('visibilitychange',()=>{if(!document.hidden){lastActivity=Date.now();if(Date.now()-lastSync>60000)poll();}});
 async function init() {
   try {
     if (demo) { state = seedDemo(); render(); return; }
-    const session = await api('session'); csrf = session.csrf; needsSetup = session.needsSetup; setupLocation = session.setupLocation || 'local';
+    const session = await api('session'); csrf = session.csrf; compactMode=Boolean(session.compact); needsSetup = session.needsSetup; setupLocation = session.setupLocation || 'local';
     if (session.user) { await refresh(); startPolling(); } else renderAuth();
   } catch (error) { app.innerHTML = `<main class="error-page"><h1>The workspace isn’t ready yet.</h1><p>${esc(error.message || 'Check your connection, then try again.')}</p><button class="btn primary" id="retry">Try again</button></main>`; $('#retry').onclick = init; }
 }

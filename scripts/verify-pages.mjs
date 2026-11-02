@@ -1,6 +1,7 @@
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { readFile } from 'node:fs/promises';
 import assert from 'node:assert/strict';
+import { sqlStatements } from './sql-statements.mjs';
 
 // Runs the compiled Pages Functions in Cloudflare's local workerd runtime.
 // No Cloudflare account, remote database, or network credentials are used.
@@ -16,7 +17,7 @@ const runtime = new Miniflare(convertV4MiniflareOptions({
 try {
   const db = await runtime.getD1Database('DB');
   const schema = await readFile('cloudflare/schema.sql', 'utf8');
-  const statements = schema.match(/CREATE TRIGGER[\s\S]*?END;|CREATE [\s\S]*?;/g);
+  const statements = sqlStatements(schema);
   await db.batch(statements.map(sql => db.prepare(sql)));
   let cookie = '', csrf = '';
   async function request(path, input) {

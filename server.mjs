@@ -40,7 +40,7 @@ export function createApp(options = {}) {
       const url = new URL(req.url, 'http://localhost');
       if (!url.pathname.startsWith('/api/')) {
         if (!['GET', 'HEAD'].includes(req.method)) fail('Method not allowed.', 405);
-        const files = { '/app.js': ['app.js', 'text/javascript'], '/styles.css': ['styles.css', 'text/css'], '/material.css': ['material.css', 'text/css'], '/goals.css': ['goals.css', 'text/css'], '/favicon.svg': ['favicon.svg', 'image/svg+xml'] };
+        const files = { '/app.js': ['app.js', 'text/javascript'], '/styles.css': ['styles.css', 'text/css'], '/material.css': ['material.css', 'text/css'], '/goals.css': ['goals.css', 'text/css'], '/enterprise.css': ['enterprise.css', 'text/css'], '/favicon.svg': ['favicon.svg', 'image/svg+xml'] };
         const item = files[url.pathname] || (['/', '/demo', '/join'].includes(url.pathname) ? ['index.html', 'text/html'] : null);
         if (!item) fail('Page not found.', 404);
         const data = await readFile(join(root, 'public', item[0]));

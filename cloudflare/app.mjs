@@ -1,6 +1,7 @@
 import { fail } from '../lib/rules.mjs';
 import { createCloudStore } from './store.mjs';
 import { equal, hash } from './auth.mjs';
+import { createCompactStore, cachedSummary } from './compact.mjs';
 
 const security = {
   'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store',
@@ -52,7 +53,7 @@ export async function handleRequest(request, env, context = {}) {
       const expected = env.APP_ORIGIN || url.origin;
       if (request.headers.get('origin') !== expected || (request.headers.has('sec-fetch-site') && !['same-origin', 'none'].includes(request.headers.get('sec-fetch-site')))) fail('This request must come from the dashboard.', 403);
     }
-    if (url.pathname === '/api/session' && request.method === 'GET') return send(200, { user: session?.user || null, csrf: session?.csrf || null, needsSetup: !await store.countUsers(), setupLocation: 'cloudflare' });
+    if (url.pathname === '/api/session' && request.method === 'GET') return send(200, { user: session?.user || null, csrf: session?.csrf || null, needsSetup: !await store.countUsers(), setupLocation: 'cloudflare', compact: Boolean(await createCompactStore(env.DB).revision()) });
     if (['/api/setup', '/api/login', '/api/join'].includes(url.pathname) && request.method === 'POST') {
       await rateLimit(env.DB, `auth:${ip}`, 15, 15 * 60000);
       const input = await body(request); let user;
@@ -72,6 +73,21 @@ export async function handleRequest(request, env, context = {}) {
     if (!session) fail('Please sign in to continue.', 401);
     if (mutation && !equal(request.headers.get('x-csrf-token'), session.csrf)) fail('Session verification failed. Refresh and try again.', 403);
     const user = session.user;
+    if (request.method === 'GET' && (url.pathname === '/api/dashboard' || url.pathname.startsWith('/api/records'))) {
+      const compact = createCompactStore(env.DB), version = await compact.revision();
+      if (!version) fail('Apply cloudflare/migrations/0001-capacity.sql to enable optimized data loading.',503);
+      if (url.pathname === '/api/dashboard') {
+        const etag = `"${version}-${user.id}-${user.role}"`;
+        if (request.headers.get('if-none-match') === etag) return new Response(null,{status:304,headers:{...security,ETag:etag}});
+        const cache = context.cache || (typeof caches !== 'undefined' ? caches.default : null);
+        const common = await cachedSummary(`${url.origin}/__internal_summary/${version}`,()=>compact.shared(),cache);
+        return send(200,{...await compact.dashboard(user,common),version},{ETag:etag});
+      }
+      if (url.pathname === '/api/records') return send(200,await compact.records(user,url.searchParams));
+      const id = url.pathname.slice('/api/records/'.length);
+      if (id && !id.includes('/')) return send(200,await compact.detail(user,id));
+      fail('Endpoint not found.',404);
+    }
     if (url.pathname === '/api/state' && request.method === 'GET') return send(200, await store.state(user));
     if (url.pathname === '/api/logout' && request.method === 'POST') { await store.logout(raw); return send(200, { ok: true }, { 'Set-Cookie': cookie('', true) }); }
     if (url.pathname === '/api/invites' && request.method === 'POST') return send(201, await store.invite(user, await body(request)));

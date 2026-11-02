@@ -17,3 +17,4 @@ jobs:
       - run: npm run build:pages
       - run: npm run check:pages
       - run: npm run test:pages
+      - run: npm run test:capacity

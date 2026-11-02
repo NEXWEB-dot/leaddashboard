@@ -162,3 +162,6 @@ The tests cover URL aliases and unsafe links, invite binding/expiry/reuse, score
 6. **Larger teams:** managed PostgreSQL, full-text search, pagination, two-factor sign-in, and email-based recovery.
 
 Start with quality criteria and prospect duplicate matching before adding more volume-based rewards.
+# Capacity and interface upgrade
+
+The workspace now includes a personal **My work** home and an optimized Cloudflare data path for growing teams. Existing D1 workspaces must apply the additive migration in [CAPACITY-AND-UPGRADE.md](CAPACITY-AND-UPGRADE.md). The guide includes measured results for 39,000 leads/63,700 contributions and ten concurrent members, plus free-tier limits and deployment steps.

@@ -1,5 +1,7 @@
 # Connect Leadroom to Cloudflare Pages
 
+**Existing workspace?** The capacity upgrade needs a one-time additive database migration. Follow [CAPACITY-AND-UPGRADE.md](CAPACITY-AND-UPGRADE.md) before expecting optimized caching and paginated data loading. Existing accounts and leads are retained.
+
 After this one-time setup, open the Cloudflare website link from any device. Your computer can be off, and you do not need to run `npm start`.
 
 ## 1. Connect this repository
