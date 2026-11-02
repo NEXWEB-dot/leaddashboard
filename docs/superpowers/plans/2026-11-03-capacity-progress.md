@@ -18,3 +18,7 @@ Ruling: keep the existing checkout, use the approved GitHub/main destination, an
 Ruling: production D1 migration requires the owner's Cloudflare account. Ship an additive rerunnable SQL file, preserve legacy mode until readiness, and show the admin a setup-guide banner rather than claim optimized production rollout before it is applied.
 
 Browser verification: desktop DOM showed four metric columns/two main columns and no page overflow at a 1440×1000 viewport; mobile showed two metric columns and no page overflow at 390×844. Browser demo submission entered Pending without increasing approved leads; admin approval then increased the personal approved-lead count. Preview data only, no production records changed.
+
+Publication follow-up: GitHub main was verified at 7aff238 on the next turn; the capacity upgrade upload succeeded after the account selection. Production migration readiness remains separate.
+
+Frontend refinement requested by the owner: replaced promotional/pastel panels with a compact neutral workspace, a single metrics strip, recent-submissions table, utility actions, small target/standings rail and mobile navigation drawer. Navigation and status labels remain tied to the same approved data. Review found no blocking logic issues; the small-desktop rejected-status wrapping edge was fixed and checked in-browser at 1024px (badge 72px within a 98px cell, no document overflow). Mobile lead tables expose opportunity/status/details without horizontal searching. Full suite: 38 tests passed; backend unchanged in this refinement.

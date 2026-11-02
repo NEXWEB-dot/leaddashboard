@@ -22,7 +22,7 @@ test('sample dashboard renders and all eight screens and submission dialogs open
   assert.match(c.node('#app').innerHTML, /My work/);
   assert.match(c.node('#app').innerHTML, /Preview workspace/);
   assert.match(c.node('#app').innerHTML, /rank r1/);
-  for (const [page, text] of [['goals', 'Your weekly goals'], ['leads', 'One shared pipeline'], ['leaderboard', 'By leads'], ['review', 'Review contributions'], ['team', 'Better together'], ['activity', 'Workspace audit trail'], ['rules', '10'], ['overview', 'Your next steps']]) {
+  for (const [page, text] of [['goals', 'Your weekly goals'], ['leads', 'One shared pipeline'], ['leaderboard', 'By leads'], ['review', 'Review contributions'], ['team', 'Your team'], ['activity', 'Workspace audit trail'], ['rules', '10'], ['overview', 'Your next steps']]) {
     await c.click({ page }); assert.match(c.node('#app').innerHTML, new RegExp(text));
   }
   for (const kind of ['lead', 'instagram', 'dm']) { await c.click({ add: kind }); assert.equal(c.node('#modal').open, true); assert.match(c.node('#modal').innerHTML, new RegExp(`data-kind="${kind}"`)); }
@@ -142,6 +142,16 @@ test('guided lead form submits pending work through the real form handler',async
   c.context.testForm=form;
   await vm.runInContext('onSubmit({target:{closest:()=>testForm},preventDefault(){}})',c.context);
   assert.equal(vm.runInContext("state.submissions.find(s=>s.title==='New form lead')?.status",c.context),'pending');
+});
+
+test('mobile navigation opens explicitly and closes when a destination is selected',async()=>{
+  const c=client();
+  await c.click({action:'toggle-menu'});
+  assert.equal(vm.runInContext('navOpen',c.context),true);
+  assert.match(c.node('#app').innerHTML,/aria-expanded="true"/);
+  await c.click({page:'leads'});
+  assert.equal(vm.runInContext('navOpen',c.context),false);
+  assert.match(c.node('#app').innerHTML,/aria-expanded="false"/);
 });
 
 test('goal progress, recognition, shared celebrations, and self-review controls follow approved data', async () => {
