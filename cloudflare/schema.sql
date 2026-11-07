@@ -5,14 +5,13 @@ CREATE TABLE IF NOT EXISTS users (
   password TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('admin','member')),
   active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL
 );
-CREATE UNIQUE INDEX IF NOT EXISTS users_one_admin ON users(role) WHERE role='admin';
 CREATE TABLE IF NOT EXISTS sessions (
   hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id),
   csrf TEXT NOT NULL, expires_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS sessions_expiry ON sessions(expires_at);
 CREATE TABLE IF NOT EXISTS invites (
-  id TEXT PRIMARY KEY, email TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'member' CHECK(role='member'),
+  id TEXT PRIMARY KEY, email TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'member' CHECK(role IN ('admin','member')),
   token_hash TEXT NOT NULL UNIQUE, expires_at TEXT NOT NULL, used_at TEXT,
   created_by TEXT NOT NULL REFERENCES users(id)
 );

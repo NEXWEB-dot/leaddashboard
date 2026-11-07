@@ -54,20 +54,20 @@ export function createCloudStore(binding) {
   }
   async function invite(user, input) {
     admin(user);
-    if (input.role && input.role !== 'member') fail('Invitations grant member access only.', 403);
-    const address = email(input.email);
+    if (input.role && !['admin', 'member'].includes(input.role)) fail('Invalid role.');
+    const address = email(input.email), role = input.role === 'admin' ? 'admin' : 'member';
     if (await first('SELECT 1 FROM users WHERE email=?', address)) fail('This person already has an account.', 409);
     const raw = token(), id = crypto.randomUUID(), expiresAt = new Date(Date.now() + 7 * 86400000).toISOString();
-    await commit([q("INSERT INTO invites(id,email,role,token_hash,expires_at,created_by) VALUES(?,?,'member',?,?,?)", id, address, await hash(raw), expiresAt, user.id), audit(user.id, 'invite.created', id, address)], [actorCheck(user, true)]);
-    return { token: raw, expiresAt, email: address, role: 'member' };
+    await commit([q("INSERT INTO invites(id,email,role,token_hash,expires_at,created_by) VALUES(?,?,?,?,?,?)", id, address, role, await hash(raw), expiresAt, user.id), audit(user.id, 'invite.created', id, `${address} (${role})`)], [actorCheck(user, true)]);
+    return { token: raw, expiresAt, email: address, role };
   }
   async function join(input) {
     const tokenHash = await hash(text(input.token, 'Invitation', 100));
     const invitation = await first('SELECT * FROM invites WHERE token_hash=? AND used_at IS NULL AND expires_at>?', tokenHash, now());
     if (!invitation) fail('This invitation is invalid, used, or expired.', 403);
     if (email(input.email) !== invitation.email) fail('Use the email this invitation was created for.', 403);
-    const user = await userData(input, 'member');
-    await commit([insertUser(user), q('UPDATE invites SET used_at=? WHERE id=?', now(), invitation.id), audit(user.id, 'account.created', user.id, 'member')], [['EXISTS(SELECT 1 FROM invites WHERE id=? AND token_hash=? AND used_at IS NULL AND expires_at>?)', invitation.id, tokenHash, now()]]);
+    const user = await userData(input, invitation.role);
+    await commit([insertUser(user), q('UPDATE invites SET used_at=? WHERE id=?', now(), invitation.id), audit(user.id, 'account.created', user.id, invitation.role)], [['EXISTS(SELECT 1 FROM invites WHERE id=? AND token_hash=? AND used_at IS NULL AND expires_at>?)', invitation.id, tokenHash, now()]]);
     return publicUser(user);
   }
   async function submit(user, input) {
@@ -143,11 +143,16 @@ export function createCloudStore(binding) {
   }
   async function updateMember(user, id, input) {
     admin(user);
-    if (id === user.id) fail('The sole admin cannot be disabled or demoted.', 403);
-    if (input.role && input.role !== 'member') fail('Members cannot be promoted.', 403);
-    if (typeof input.active !== 'boolean') fail('Invalid access settings.');
-    if (!await first('SELECT 1 FROM users WHERE id=?', id)) fail('Member not found.', 404);
-    await commit([q("UPDATE users SET role='member',active=? WHERE id=?", input.active ? 1 : 0, id), ...(!input.active ? [q('DELETE FROM sessions WHERE user_id=?', id)] : []), audit(user.id, 'member.updated', id, JSON.stringify({ role: 'member', active: input.active }))], [actorCheck(user, true)]);
+    const target = await first('SELECT * FROM users WHERE id=?', id);
+    if (!target) fail('Member not found.', 404);
+    if (input.role && !['admin', 'member'].includes(input.role)) fail('Invalid access settings.');
+    const role = input.role || target.role;
+    const active = typeof input.active === 'boolean' ? (input.active ? 1 : 0) : target.active;
+    if ((target.role === 'admin' && role !== 'admin') || (target.role === 'admin' && !active)) {
+      const otherAdmins = (await first("SELECT count(*) n FROM users WHERE role='admin' AND active=1 AND id!=?", id))?.n || 0;
+      if (otherAdmins < 1) fail('The workspace must have at least one active admin.', 403);
+    }
+    await commit([q("UPDATE users SET role=?,active=? WHERE id=?", role, active, id), ...(!active ? [q('DELETE FROM sessions WHERE user_id=?', id)] : []), audit(user.id, 'member.updated', id, JSON.stringify({ role, active: Boolean(active) }))], [actorCheck(user, true)]);
     return { ok: true };
   }
   async function changePassword(user, input) {

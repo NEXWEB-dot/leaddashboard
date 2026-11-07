@@ -134,19 +134,28 @@ test('rejected evidence can be resubmitted; disabling accounts revokes sessions'
   } finally { store.close(); }
 });
 
-test('only the original owner can be admin; invite and promotion tampering is blocked', () => {
+test('multi-admin support: invite admin, promote member, and lockout protection', () => {
   const { store, admin, member } = team();
   try {
-    throwsStatus(() => store.invite(admin, { email: 'extra-admin@example.com', role: 'admin' }), 403);
-    throwsStatus(() => store.updateMember(admin, member.id, { role: 'admin', active: true }), 403);
+    const adminInvite = store.invite(admin, { email: 'admin2@example.com', role: 'admin' });
+    assert.equal(adminInvite.role, 'admin');
+    const admin2 = store.join({ ...account('admin2@example.com'), token: adminInvite.token });
+    assert.equal(admin2.role, 'admin');
+
+    const memberInvite = store.invite(admin2, { email: 'newmember@example.com', role: 'member' });
+    assert.equal(memberInvite.role, 'member');
+
+    store.updateMember(admin, member.id, { role: 'admin', active: true });
+    assert.equal(store.state(admin).members.find(m => m.id === member.id).role, 'admin');
+
+    store.updateMember(admin, member.id, { role: 'member', active: true });
+    assert.equal(store.state(admin).members.find(m => m.id === member.id).role, 'member');
+
+    store.updateMember(admin, admin2.id, { role: 'member', active: true });
+
+    throwsStatus(() => store.updateMember(admin, admin.id, { role: 'member' }), 403);
+    throwsStatus(() => store.updateMember(admin, admin.id, { active: false }), 403);
     throwsStatus(() => store.updateMember(member, admin.id, { active: false }), 403);
-    const invite = store.invite(admin, { email: 'injected@example.com' });
-    // Emulate a legacy invite or tampered client role. Neither can grant admin.
-    store.db.prepare("UPDATE invites SET role='admin' WHERE email='injected@example.com'").run();
-    const joined = store.join({ ...account('injected@example.com'), token: invite.token, role: 'admin' });
-    assert.equal(joined.role, 'member');
-    assert.equal(store.state(admin).members.filter(m => m.role === 'admin').length, 1);
-    assert.throws(() => store.db.prepare("UPDATE users SET role='admin' WHERE id=?").run(member.id), /UNIQUE/);
   } finally { store.close(); }
 });
 
@@ -203,25 +212,19 @@ test('weekly goals are validated, owner-only, audited, and persisted across rest
   } finally { store.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('an older database keeps its original owner and converts extra admins and pending admin invites', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'leadroom-owner-'));
-  let store = createStore(join(dir, 'legacy.sqlite'));
+test('multiple admins persist and retain admin access across database restarts', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'leadroom-multi-admin-'));
+  let store = createStore(join(dir, 'multi.sqlite'));
   try {
     const owner = store.bootstrap(account('owner@example.com'));
-    const invite = store.invite(owner, { email: 'former-admin@example.com' });
-    const former = store.join({ ...account('former-admin@example.com'), token: invite.token });
-    const pending = store.invite(owner, { email: 'pending@example.com' });
-    const session = store.createSession(former.id);
-    store.db.exec('DROP INDEX users_one_admin');
-    store.db.prepare("UPDATE users SET role='admin' WHERE id=?").run(former.id);
-    store.db.prepare("UPDATE invites SET role='admin' WHERE email='pending@example.com'").run();
-    store.close(); store = createStore(join(dir, 'legacy.sqlite'));
+    const invite = store.invite(owner, { email: 'admin2@example.com', role: 'admin' });
+    const admin2 = store.join({ ...account('admin2@example.com'), token: invite.token });
+    assert.equal(admin2.role, 'admin');
+    store.close();
+    store = createStore(join(dir, 'multi.sqlite'));
     const members = store.state(owner).members;
     assert.equal(members.find(m => m.id === owner.id).role, 'admin');
-    assert.equal(members.find(m => m.id === former.id).role, 'member');
-    assert.equal(store.session(session.token), null);
-    assert.equal(store.join({ ...account('pending@example.com'), token: pending.token }).role, 'member');
-    assert.equal(store.state(owner).audit.some(a => a.action === 'member.admin_removed'), true);
+    assert.equal(members.find(m => m.id === admin2.id).role, 'admin');
   } finally { store.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -274,7 +277,7 @@ test('HTTP: bootstrap token, protected APIs, CSRF, origin, cookies, static pages
     assert.equal((await request('/api/invites', { email: 'member@example.com' }, { 'X-CSRF-Token': 'wrong' })).res.status, 403);
     assert.equal((await request('/api/invites', { email: 'member@example.com' }, { Origin: 'https://evil.example' })).res.status, 403);
     const invitation = await request('/api/invites', { email: 'member@example.com' }); assert.equal(invitation.res.status, 201);
-    assert.equal((await request('/api/invites', { email: 'second-admin@example.com', role: 'admin' })).res.status, 403);
+    const secondAdmin = await request('/api/invites', { email: 'second-admin@example.com', role: 'admin' }); assert.equal(secondAdmin.res.status, 201);
     assert.equal((await request('/api/goals', { ...DEFAULT_GOALS, teamPoints: 600 })).res.status, 200);
     const post = await request('/api/submissions', postInput()); assert.equal(post.res.status, 201);
     assert.equal((await request(`/api/submissions/${post.data.id}/review`, { decision: 'approve' })).res.status, 200);

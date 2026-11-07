@@ -46,12 +46,12 @@ test('Cloudflare: complete owner setup, member invitation, scoring, privacy, rev
     const setup = await owner('setup', { ...account('owner@example.com'), setupToken: f.env.SETUP_TOKEN });
     assert.equal(setup.status, 200); assert.match(setup.response.headers.get('set-cookie'), /Secure; SameSite=Strict/);
     assert.equal((await owner('setup', { ...account('other@example.com'), setupToken: f.env.SETUP_TOKEN })).status, 409);
-    assert.equal((await owner('invites', { email: 'otheradmin@example.com', role: 'admin' })).status, 403);
+    const adminInvite = await owner('invites', { email: 'otheradmin@example.com', role: 'admin' }); assert.equal(adminInvite.status, 201);
     assert.equal((await owner('goals', DEFAULT_GOALS, { Origin: 'https://evil.example' })).status, 403);
     assert.equal((await owner('goals', DEFAULT_GOALS, { 'X-CSRF-Token': 'wrong' })).status, 403);
     const invitation = await owner('invites', { email: 'member@example.com' }); assert.equal(invitation.status, 201);
     assert.equal((await member('join', { ...account('wrong@example.com'), token: invitation.body.token })).status, 403);
-    assert.equal((await member('join', { ...account('member@example.com'), token: invitation.body.token, role: 'admin' })).body.user.role, 'member');
+    assert.equal((await member('join', { ...account('member@example.com'), token: invitation.body.token })).body.user.role, 'member');
     assert.equal((await member('join', { ...account('member@example.com'), token: invitation.body.token })).status, 403);
     assert.equal((await member('goals', DEFAULT_GOALS)).status, 403);
     const lead = await member('submissions', leadInput('54321')); assert.equal(lead.status, 201);
