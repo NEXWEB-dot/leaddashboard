@@ -1,4 +1,4 @@
-import { POINTS, DEFAULT_GOALS, periodStart, fail } from '../lib/rules.mjs';
+import { POINTS, DEFAULT_GOALS, periodStart, fail, detectPlatform } from '../lib/rules.mjs';
 
 const fields={lead:'leads',instagram:'posts',dm:'dms',reply:'replies',call:'calls',win:'wins'};
 const empty=()=>({leads:0,posts:0,dms:0,replies:0,calls:0,wins:0,points:0});
@@ -6,7 +6,7 @@ const privateKinds=['dm','reply','call','win'];
 const cleanUser=r=>({id:r.id,name:r.name,email:r.email,role:r.role,active:Boolean(r.active),createdAt:r.created_at});
 const cleanRow=(r,user)=>{
   const hidden=user.role!=='admin' && r.user_id!==user.id && privateKinds.includes(r.kind);
-  return {id:r.id,userId:r.user_id,kind:r.kind,title:r.title,url:hidden?'':r.url,country:r.country,service:r.service,notes:hidden?'':r.notes,leadId:r.lead_id,proof:hidden?'':r.proof,status:r.status,stage:r.stage,followUp:r.follow_up,createdAt:r.created_at,updatedAt:r.updated_at,approvedAt:r.approved_at,reviewerId:r.reviewer_id,reviewNote:hidden?'':r.review_note};
+  return {id:r.id,userId:r.user_id,kind:r.kind,title:r.title,url:hidden?'':r.url,country:r.country,service:r.service,notes:hidden?'':r.notes,leadId:r.lead_id,proof:hidden?'':r.proof,status:r.status,stage:r.stage,followUp:r.follow_up,createdAt:r.created_at,updatedAt:r.updated_at,approvedAt:r.approved_at,reviewerId:r.reviewer_id,reviewNote:hidden?'':r.review_note,platform:r.kind==='lead'?(r.platform||detectPlatform(r.url)):''};
 };
 function ranked(rows,metric){
   const secondary=metric==='points'?'leads':'points';

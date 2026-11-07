@@ -46,6 +46,29 @@ test('normalizes Facebook and LinkedIn URLs and strips tracking parameters', () 
   assert.throws(() => safeLeadURL('https://example.com/not-li', 'linkedin'), /LinkedIn/);
 });
 
+test('lead submission accepts platform, validates URL, and returns platform in submission and state', () => {
+  const { store, admin, member } = team();
+  try {
+    const fbLead = store.submit(member, {
+      ...leadInput(),
+      title: 'Design Studio',
+      platform: 'facebook',
+      url: 'https://m.facebook.com/groups/123/posts/456/?mibextid=6aamW6&fbclid=abc'
+    });
+    assert.equal(fbLead.platform, 'facebook');
+    assert.equal(fbLead.url, 'https://facebook.com/groups/123/posts/456');
+
+    const stateLead = store.state(admin).submissions.find(s => s.id === fbLead.id);
+    assert.equal(stateLead.platform, 'facebook');
+
+    throwsStatus(() => store.submit(member, {
+      ...leadInput(),
+      platform: 'facebook',
+      url: 'https://www.linkedin.com/posts/activity-999'
+    }), 400);
+  } finally { store.close(); }
+});
+
 test('invite-only accounts: bound to email, single use, and admin-only', () => {
   const { store, admin, member } = team();
   try {

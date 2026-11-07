@@ -1,9 +1,9 @@
-import { POINTS, DEFAULT_GOALS, fail, text, email, safeURL, instagramURL, rankMembers } from '../lib/rules.mjs';
+import { POINTS, DEFAULT_GOALS, fail, text, email, safeURL, safeLeadURL, detectPlatform, instagramURL, rankMembers } from '../lib/rules.mjs';
 import { token, hash, passwordHash, passwordMatches, dummyPassword } from './auth.mjs';
 
 const now = () => new Date().toISOString();
 const publicUser = row => row && ({ id: row.id, name: row.name, email: row.email, role: row.role, active: Boolean(row.active), createdAt: row.created_at });
-const publicSubmission = r => ({ id: r.id, userId: r.user_id, kind: r.kind, title: r.title, url: r.url, country: r.country, service: r.service, notes: r.notes, leadId: r.lead_id, proof: r.proof, status: r.status, stage: r.stage, followUp: r.follow_up, createdAt: r.created_at, updatedAt: r.updated_at, approvedAt: r.approved_at, reviewerId: r.reviewer_id, reviewNote: r.review_note });
+const publicSubmission = r => ({ id: r.id, userId: r.user_id, kind: r.kind, title: r.title, url: r.url, country: r.country, service: r.service, notes: r.notes, leadId: r.lead_id, proof: r.proof, status: r.status, stage: r.stage, followUp: r.follow_up, createdAt: r.created_at, updatedAt: r.updated_at, approvedAt: r.approved_at, reviewerId: r.reviewer_id, reviewNote: r.review_note, platform: r.kind === 'lead' ? (r.platform || detectPlatform(r.url)) : '' });
 const privateKinds = ['dm', 'reply', 'call', 'win'];
 
 export function createCloudStore(binding) {
@@ -77,7 +77,8 @@ export function createCloudStore(binding) {
     let title = text(input.title, 'Title', 160, 3), url, key, leadId = null, proof = '', country = '', service = '';
     const notes = text(input.notes || '', 'Notes', 2000, 0), checks = [actorCheck(user), ['(SELECT count(*) FROM submissions WHERE user_id=? AND created_at>?)<100', user.id, cutoff]];
     if (kind === 'lead') {
-      url = safeURL(input.url, 'Source post link'); key = `lead:${url}`;
+      const platform = (input.platform || detectPlatform(input.url)).toLowerCase();
+      url = safeLeadURL(input.url, platform); key = `lead:${url}`;
       if (!['Pakistan', 'USA', 'Other'].includes(input.country)) fail('Choose a country.');
       if (!['Web development', 'Website redesign', 'Landing page', 'Other'].includes(input.service)) fail('Choose a service.');
       country = input.country; service = input.service;
