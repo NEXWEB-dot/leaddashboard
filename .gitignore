@@ -14,3 +14,4 @@ coverage/
 test-results/
 .DS_Store
 Thumbs.db
+.superpowers/

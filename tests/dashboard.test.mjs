@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createStore, safeURL, instagramURL, rankMembers, periodStart, DEFAULT_GOALS } from '../lib/store.mjs';
+import { createStore, safeURL, safeLeadURL, detectPlatform, instagramURL, rankMembers, periodStart, DEFAULT_GOALS } from '../lib/store.mjs';
 import { createApp } from '../server.mjs';
 
 const account = (email, name = 'Test Member') => ({ name, email, password: 'correct horse battery staple' });
@@ -24,6 +24,26 @@ test('URLs canonicalize tracking, country subdomains, and LinkedIn activity alia
   assert.equal(instagramURL('https://www.instagram.com/reel/ABC123/?igsh=x').key, instagramURL('https://instagram.com/p/ABC123').key);
   for (const bad of ['javascript:alert(1)', 'http://example.com', 'https://user:pass@example.com', 'https://127.0.0.1/x', 'https://localhost/x']) assert.throws(() => safeURL(bad));
   for (const bad of ['https://instagram.com/teamname', 'https://instagram.com.evil.com/p/ABC', 'https://example.com/p/ABC']) assert.throws(() => instagramURL(bad));
+});
+
+test('normalizes Facebook and LinkedIn URLs and strips tracking parameters', () => {
+  assert.equal(
+    safeLeadURL('https://m.facebook.com/groups/123/posts/456/?mibextid=6aamW6&fbclid=IwAR123', 'facebook'),
+    'https://facebook.com/groups/123/posts/456'
+  );
+  assert.equal(
+    safeLeadURL('https://web.facebook.com/permalink.php?story_fbid=123&id=456&substory_index=0&fbclid=xyz', 'facebook'),
+    'https://facebook.com/permalink.php?story_fbid=123&id=456'
+  );
+  assert.equal(
+    safeLeadURL('https://www.linkedin.com/posts/acme_hiring-activity-123456789-abcd?utm_source=share', 'linkedin'),
+    'https://www.linkedin.com/feed/update/urn:li:activity:123456789'
+  );
+  assert.equal(detectPlatform('https://facebook.com/groups/123/posts/456'), 'facebook');
+  assert.equal(detectPlatform('https://www.linkedin.com/feed/update/urn:li:activity:123'), 'linkedin');
+  assert.equal(detectPlatform('https://example.com/job/123'), 'other');
+  assert.throws(() => safeLeadURL('https://example.com/not-fb', 'facebook'), /Facebook/);
+  assert.throws(() => safeLeadURL('https://example.com/not-li', 'linkedin'), /LinkedIn/);
 });
 
 test('invite-only accounts: bound to email, single use, and admin-only', () => {
