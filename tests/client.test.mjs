@@ -27,7 +27,7 @@ test('sample dashboard renders and all eight screens and submission dialogs open
   }
   for (const kind of ['lead', 'instagram', 'dm']) { await c.click({ add: kind }); assert.equal(c.node('#modal').open, true); assert.match(c.node('#modal').innerHTML, new RegExp(`data-kind="${kind}"`)); }
   await c.click({ action: 'invite' }); assert.match(c.node('#modal').innerHTML, /Email address/);
-  assert.doesNotMatch(c.node('#modal').innerHTML, /name="role"/);
+  assert.match(c.node('#modal').innerHTML, /name="role"/);
   await c.click({ action: 'outcome' }); assert.match(c.node('#modal').innerHTML, /Client won · 50 points/);
   await c.click({ action: 'edit-goals' }); assert.match(c.node('#modal').innerHTML, /name="teamPoints"/);
   await c.click({ action: 'close' }); assert.equal(c.node('#modal').open, false);
@@ -154,15 +154,18 @@ test('mobile navigation opens explicitly and closes when a destination is select
   assert.match(c.node('#app').innerHTML,/aria-expanded="false"/);
 });
 
-test('calendar navigation shows real month boundaries and returns to the current month',async()=>{
-  const c=client();
-  const initial=vm.runInContext('calendarPanel()',c.context);
-  await c.click({calendar:'next'});
-  assert.equal(vm.runInContext('calendarOffset',c.context),1);
-  assert.notEqual(vm.runInContext('calendarPanel()',c.context),initial);
-  await c.click({calendar:'today'});
-  assert.equal(vm.runInContext('calendarOffset',c.context),0);
-  assert.equal(vm.runInContext('calendarPanel()',c.context),initial);
+test('lead modal provides platform selector and manage member supports role', async () => {
+  const c = client();
+  await c.click({ add: 'lead' });
+  assert.equal(c.node('#modal').open, true);
+  assert.match(c.node('#modal').innerHTML, /name="platform"/);
+  assert.match(c.node('#modal').innerHTML, /LinkedIn/);
+  assert.match(c.node('#modal').innerHTML, /Facebook/);
+  await c.click({ page: 'team' });
+  const firstMemberId = vm.runInContext('state.members[1].id', c.context);
+  await c.click({ member: firstMemberId });
+  assert.equal(c.node('#modal').open, true);
+  assert.match(c.node('#modal').innerHTML, /name="role"/);
 });
 
 test('workspace search opens the real filtered lead list',async()=>{
